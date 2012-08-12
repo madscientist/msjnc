@@ -1,4 +1,4 @@
 msjnc
 =====
 
-MadScientist Juniper Network Connect Session Manager
+MadScientist Juniper Network Connect VPN Session Manager

@@ -1,0 +1,2166 @@
+#!/usr/bin/perl -w
+#
+my $C = 'Copyright 2008-2012 Paul D. Smith <paul@mad-scientist.net>';
+#
+# MadScientist Juniper Network Connect UI
+# I know this script is really long, but it turns out doing anything
+# with a GUI takes a lot of--mostly grunt-work--code.  Fun!
+#
+# This is a followup to my previous version, which was written in POSIX sh.
+# That version simply invoked the Juniper-provided Network Connect GUI;
+# this was problematic because that GUI needed 32bit Java and didn't work
+# well with non-Sun/Oracle versions of Java.
+#
+# This version has its own GUI using Perl/GTK2, so it doesn't need
+# any Java at all.  Yay!
+#
+my $L = '
+This script is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation; either version 3 of the License, or (at your option)
+any later version.
+
+This script is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+more details.';
+#
+# Requires that Perl GTK2 be installed.
+# Typically this means using your package manager to install packages such as
+# Red Hat/Fedora:    perl-Gtk2
+# Debian/Ubuntu:     libgtk2-perl
+#
+# This script tries to detect the REALM.  If there's only one realm possible
+# then typically it will be embedded in the web page; in that case we can
+# find it.  If there is >1 realm then you'll have to look at the page source
+# and try to find them.  Look for something like:
+#    <input ... name="realm" value="XXXX">
+# and use "XXXX" (no quotes) as the realm value.
+
+my $VERSION = '2.0';
+my $RELDATE = '15 Jul 2012';
+my $RELURL  = 'http://mad-scientist.net/juniper.html';
+
+my $debug = 0;
+
+use strict;
+use Carp;
+use Getopt::Long;
+use File::Copy;
+use File::Temp qw(tempdir);
+use POSIX qw(_exit setsid strftime);
+use Net::Ping;
+use LWP::Simple;
+
+# Get graphics
+use Glib;
+use Gtk2 '-init';
+use Gtk2::SimpleMenu;
+use Gtk2::Pango;
+
+# For debug
+use Data::Dumper;
+
+$ENV{PATH} = '/sbin:/usr/sbin:/bin:/usr/bin:'.$ENV{PATH};
+umask(022);
+
+# General-purpose variables
+our $HOME;
+
+my %OPTS;
+my $JNPATH;
+my $JNCPATH;
+my $NCSVC;
+my $JNCICON;
+my $GETCERT = 'getx509certificate.sh';
+
+# Log objects
+my $LOGFILE = '.msjnc.log';
+my $LOGH = undef;
+
+# GUI objects
+my $WIN;
+my %OBJ;
+my $CONN;
+
+my $DESKTOP = '[Desktop Entry]
+Name=Network Connect
+Comment=MadScientist Juniper Network Connect VPN
+Type=Application
+Terminal=false
+StartupNotify=false
+Categories=Network;
+Actions=Disconnect
+Icon=@@ICON@@
+Exec=@@CMD@@
+
+[Desktop Action Disconnect]
+Name=VPN Session Disconnect
+Exec=@@CMD@@ --disconnect';
+
+
+# --------------- UTILITIES
+# Generic small utility functions
+
+# Print version info
+sub version {
+    print "MadScientist Juniper Network Connect Manager
+Version $VERSION -- $RELDATE
+$RELURL\n";
+
+    if ($NCSVC && -x $NCSVC) {
+        local $_ = `$NCSVC -v 2>&1`;
+        $? == 0 or $_ = "Failed to run $NCSVC.\n".$_;
+        print "\n$_";
+    }
+
+    exit(0);
+}
+
+# Given a timestamp (in time() format) return the elapsed time
+# in the form HH:MM:SS
+sub elapsed {
+    my $i = time() - $_[0];
+    return sprintf("%02d:%02d:%02d", $i / 3600, ($i % 3600) / 60, $i % 60);
+}
+
+# Convert a count of bytes into something more readable
+sub cvtbytes {
+    my $b = shift;
+
+    # If we have < 1K use B
+    $b < 1024 and return "$b B";
+    # If we have < 1M use K
+    $b < (1024 * 1024) and return sprintf("%.2f KiB", ($b / 1024.0));
+    # If we have < 1G use M
+    $b < (1024 * 1024 * 1024)
+        and return sprintf("%.2f MiB", $b / (1024.0 * 1024.0));
+    # Use G
+    return sprintf("%.2f GiB", $b / (1024.0 * 1024.0 * 1024.0));
+}
+
+# Read the contents of a file and return it as a string.
+# Remove the trailing newline if there is one.
+# Return undef if the file could not be read.
+sub readfile {
+    local $_;
+    open(my $F, '<', $_[0]) or return undef;
+    {
+        local $/ = undef;
+        $_ = <$F>;
+    }
+    close($F) or return undef;
+    chomp;
+    return $_;
+}
+
+sub logln {
+    if (! $LOGH) {
+        open($LOGH, '>>', "$HOME/$LOGFILE") or die "$HOME/$LOGFILE: $!\n";
+        my $s = select $LOGH; $| = 1;
+        select $s;
+    }
+    local $_ = join('', @_);
+    s/\n*$//;
+    print $LOGH strftime("%F %T%z: ", localtime()), "$_\n";
+    return 1;
+}
+our $log = \&logln;
+
+# Return a true value if a file has changed since the last time it was called
+# or undef if doesn't exist or hasn't changed.
+# You need to pass in the previously returned changed value.
+sub filechanged {
+    my ($fn, $info) = @_;
+    my @s = stat($fn) or return undef;
+
+    # If the info is empty, initialize it
+    $info && %$info or $info = {ino => 0, size => 0, mtime => 0};
+
+    # If nothing's changed since the last check, return undef
+        $info->{ino} == $s[1] && $info->{size} == $s[7] && $info->{mtime} == $s[9]
+        and return undef;
+
+    # Something changed
+    return {ino => $s[1], size => $s[7], mtime => $s[9]};
+}
+
+# This function invokes a child process and writes a password to its stdin
+# It returns 1 if the child succeeds, 0 otherwise.
+sub pwd_child {
+    my $o = ref $_[0] ? shift : {};
+    my $pwd = shift;
+
+    $log->("Writing passwd to child: @_\n");
+
+    # We want to write to the child so set up a pipe
+    my ($rd, $wr);
+    pipe($rd, $wr) or die "pipe: $!\n";
+
+    # Run it!
+    my $pid = fork();
+    defined $pid or die "fork: $!\n";
+    if (! $pid) {
+        # Child
+        open(my $N, '>', '/dev/null');
+        open(STDOUT, '>&', $N);
+
+        # Unfortunately sudo -S is broken: if the incoming password is
+        # bad it still tries to read more.  Stupid!  Throw out stderr.
+        open(STDERR, '>&', $N);
+
+        # If we're not waiting, change the process group
+        $o->{wait} or setsid();
+
+        # Read stdin from the pipe
+        open(STDIN, '<&', $rd);
+        if (!exec(@_)) {
+            print STDOUT "Failed to run $_[0]: $!\n";
+            _exit(0);
+        }
+    }
+
+    # Parent
+    # Send the password then close
+    close($rd);
+    print $wr "$pwd\n";
+    close($wr);
+
+    if (! $o->{wait}) {
+        $log->("Running pid $pid in the background");
+        return $pid;
+    }
+
+    # Wait for the child to finish.
+    $log->("Waiting for pid $pid");
+    waitpid($pid, 0) == $pid or die "waitpid($pid): $!\n";
+    my $r = $?;
+    $log->("result: $r (", ($r >> 8), ")");
+    return $r == 0;
+}
+
+# --------------- CONNECTION PROFILES
+# Manage connection profiles
+
+package jnc::Profile;
+
+use Carp;
+
+my $PROFILEFILE = '.msjnc-profiles.cfg';
+my $PROF_LOG = undef;
+my $PROFILES = {default => 0, list => {}};
+
+my $IDMAX = 0;
+my %IDMAP = ();
+
+sub _saveprofiles {
+    my $sfile = "$main::HOME/$PROFILEFILE";
+    # Create a dumper object
+    my $dumper = Data::Dumper->new([ $PROFILES ], [ 'valstore' ])
+                              ->Indent(0)->Purity(1)->Deepcopy(1);
+    my $u = umask(0077);
+    open(my $S, '>', "$sfile.$$") or die "open: $sfile.$$: $!\n";
+    print $S $dumper->Dump(), "\n" or die "write: $sfile.$$: $!\n";
+    close($S) or die "close: $sfile.$$: $!\n";
+    umask($u);
+
+    rename("$sfile.$$", $sfile) or die "rename($sfile.$$, $sfile): $!\n";
+
+    return 1;
+}
+
+sub _loadprofiles {
+    my $sfile = "$main::HOME/$PROFILEFILE";
+    my $new = main::filechanged($sfile, $PROF_LOG) or return 1;
+    $PROF_LOG = $new;
+
+    my $dumped = main::readfile($sfile);
+    defined $dumped or return 1;
+    chomp $dumped;
+
+    # Eval the contents to set the profile variable.
+    my $valstore;
+    my $r = eval($dumped);
+    $@ and die "Failed to parse $sfile: $@\n";
+
+    $PROFILES = $valstore;
+    $IDMAX = 0;
+    %IDMAP = ();
+
+    while (my ($n, $v) = each %{$PROFILES->{list}}) {
+        $IDMAP{$v->{pfid}} = $n;
+        $v->{pfid} > $IDMAX and $IDMAX = $v->{pfid};
+    }
+
+    return 1;
+}
+
+sub list {
+    _loadprofiles();
+    my @names = sort keys %{$PROFILES->{list}};
+    return wantarray ? @names : scalar(@names);
+}
+
+# Create a new profile.  Return a copy.
+sub new {
+    my ($class, $pf) = @_;
+    $pf or confess "jnc::Profile::get: undefined profile\n";
+    my $name = $pf->{name}
+        or confess "jnc::Profile::get: undefined profile name\n";
+    _loadprofiles();
+    exists $PROFILES->{list}->{$name}
+        and confess "jnc::Profile::new: Profile $name already exists\n";
+    $pf->{pfid} = ++$IDMAX;
+    $PROFILES->{list}->{$name} = { %$pf };
+    _saveprofiles();
+    $IDMAP{$pf->{pfid}} = $name;
+    return $pf;
+}
+
+# Return a copy of the profile data or undef if it doesn't exist
+sub get {
+    my ($class, $name) = @_;
+    $name or return undef;
+    _loadprofiles();
+    exists $PROFILES->{list}->{$name} or return undef;
+    return { %{$PROFILES->{list}->{$name}} };
+}
+
+# Return a copy of the profile data or undef if it doesn't exist
+# Look up based on ID, not name
+sub get_byid {
+    my ($class, $id) = @_;
+    $id or return undef;
+    _loadprofiles();
+    exists $IDMAP{$id} or return undef;
+    return jnc::Profile->get($IDMAP{$id});
+}
+
+# Set the profile data
+# Returns a copy of the new profile data (a la get())
+sub set {
+    my ($class, $new) = @_;
+    $new or confess "jnc::Profile::set: undefined new\n";
+    my $nm = $new->{name} or confess "jnc::Profile::set: undefined name\n";
+    exists $PROFILES->{list}->{$nm}
+        or confess "jnc::Profile::set: unknown name\n";
+    $PROFILES->{list}->{$nm}->{pfid} == $new->{pfid}
+        or confess "jnc::Profile::set: id doesn't match\n";
+    $PROFILES->{list}->{$nm} = $new;
+    _saveprofiles();
+    return { %$new };
+}
+
+# Rename a profile.  Return a copy of the new profile, or undef if it fails.
+# Do the right thing when renaming the default or active profile.
+sub rename {
+    my ($class, $oldname, $new) = @_;
+    $oldname or confess "jnc::Profile::rename: undefined oldname\n";
+    $new or confess "jnc::Profile::rename: undefined new\n";
+    _loadprofiles();
+    exists $PROFILES->{list}->{$oldname}
+        or confess "jnc::Profile::rename: unknown profile $oldname\n";
+    # Can't overwite an existing profile
+    exists $PROFILES->{list}->{$new->{name}} and return undef;
+    $PROFILES->{list}->{$oldname}->{pfid} == $new->{pfid}
+        or confess "jnc::Profile::rename: id doesn't match\n";
+    # Rename it
+    delete $PROFILES->{list}->{$oldname};
+    $PROFILES->{list}->{$new->{name}} = $new;
+    _saveprofiles();
+    return { %$new };
+}
+
+# Remove a profile.
+# Do the right thing when deleting the default or active profile
+sub remove {
+    my ($class, $name) = @_;
+    $name or confess "jnc::Profile::remove: undefined name\n";
+    _loadprofiles();
+    my $id = $PROFILES->{list}->{$name}->{pfid};
+    delete $PROFILES->{list}->{$name};
+    # If this is the default, unset the default
+    $PROFILES->{default} eq $id and $PROFILES->{default} = 0;
+    _saveprofiles();
+    return 1;
+}
+
+# Set the default profile.  Use '' to unset the default.
+# Returns the profile name on success, or undef on error
+sub set_default {
+    my ($class, $name) = @_;
+    if (! $name) {
+        $PROFILES->{default} = 0;
+    } else {
+        _loadprofiles();
+        exists $PROFILES->{list}->{$name} or return undef;
+        $PROFILES->{default} = $PROFILES->{list}->{$name}->{pfid};
+    }
+    _saveprofiles();
+    return $name;
+}
+
+# Return the name of the default profile or undef if none
+sub get_default {
+    _loadprofiles();
+    return $IDMAP{$PROFILES->{default}} || undef;
+}
+
+sub debug {
+    my ($class, $pf) = @_;
+    foreach my $k (sort keys %$pf) {
+        print "$k = $pf->{$k}\n";
+    }
+    return 1;
+}
+
+# --------------- VPN CONTROL
+# Manage the current VPN session
+
+package jnc::Session;
+
+use strict;
+use Carp;
+use Time::Local;
+
+my %CURRENT = ();
+my $ACTIVE = 0;
+my $PID = 0;
+my $LOG_OFFSET = 0;
+my $LOG = undef;
+
+# Convert a date as given in the NC log to time() format
+sub _cvtdate {
+    $_[0] =~ /^(\d\d\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)$/
+        or die "INTERNAL: invalid date: $_[0]\n";
+    return timelocal($6, $5, $4, $3, $2-1, $1-1900);
+}
+
+# Get the active profile, or undef if there isn't one.
+sub _get_current_pf {
+    $CURRENT{pfid} or return undef;
+    my $pf = jnc::Profile->get_byid($CURRENT{pfid});
+    if (! $pf) {
+        $log->("Session: Profile $CURRENT{pfid} does not exist.");
+        $CURRENT{pfid} = 0;
+    }
+    return $pf;
+}
+
+# Return a copy of the current status of the session
+sub get {
+    return { %CURRENT };
+}
+
+sub get_status {
+    return $CURRENT{status};
+}
+
+sub set_active {
+    my ($class, $id) = @_;
+    my $pf = jnc::Profile->get_byid($id);
+    $pf and $ACTIVE = $id;
+    return $ACTIVE;
+}
+
+sub get_active_pf {
+    return $ACTIVE ? jnc::Profile->get_byid($ACTIVE) : undef;
+}
+
+# Given a profile name, if there is a script associated with it
+# then run it.  Returns false if not invoked or success, or true on failure
+sub run_script {
+    my $pf = _get_current_pf() or return 0;
+    my $script = $pf->{script} or return 0;
+
+    $log->("Session: run user script: $script @_");
+    if (! -f $script || ! -x $script) {
+        $log->("Session: $script: $!");
+        return 1;
+    }
+
+    # Set up the environment
+    $ENV{jnc_profile} = $pf->{name};
+    foreach (qw(url host port realm user
+                proxy proxy_port proxy_domain proxy_user)) {
+        $ENV{"jnc_$_"} = $pf->{$_} || '';
+    }
+
+    local $_ = `$script @_ 2>&1`;
+    my $r = $?;
+    $log->("> $_");
+
+    $r == 0 and return 0;
+
+    $log->("Session: $script failed: $r (", ($r >> 8), ')');
+    return 1;
+}
+
+# This is invoked when the connection has completed.
+sub _connected {
+    my ($noop, $server, $ctime) = @_;
+
+    $CURRENT{status} = 'Connected';
+    $CURRENT{server} = $server;
+    $CURRENT{ctime} = $ctime;
+    $CURRENT{timedout} = 0;
+    $CURRENT{retrying} = 0;
+
+    # If we have a "maybe" password, we now know it's good
+    $CURRENT{pwd_maybe} and $CURRENT{pwd_good} = $CURRENT{pwd_maybe};
+    $CURRENT{proxy_maybe} and $CURRENT{proxy_good} = $CURRENT{proxy_maybe};
+    $CURRENT{pwd_maybe} = $CURRENT{proxy_maybe} = undef;
+
+    if (! $noop) {
+        $log->("Session: connected successfully");
+        run_script('connected');
+    }
+    return 1;
+}
+
+# Invoke this when a disconnect is discovered
+sub _disconnected {
+    my $noop = $_[0];
+
+    $CURRENT{status} = 'Disconnected';
+    $CURRENT{address} = '';
+    $CURRENT{iface} = undef;
+    $CURRENT{pwd_maybe} = $CURRENT{proxy_maybe} = undef;
+
+    if (! $noop) {
+        $log->("Session: disconnected");
+        run_script('disconnected');
+    }
+    return 1;
+}
+
+# Completely clean out the session status
+sub clean {
+    _disconnected(1);
+    $CURRENT{pfid} = 0;
+    $CURRENT{pwd_good} = $CURRENT{proxy_good} = undef;
+    $CURRENT{pwd_maybe} = $CURRENT{proxy_maybe} = undef;
+    $CURRENT{ctime} = 0;
+    $CURRENT{received} = $CURRENT{sent} = 0;
+    $CURRENT{total_ctime} = 0;
+    $CURRENT{total_received} = $CURRENT{total_sent} = 0;
+    return 1;
+}
+
+# Read the log file and process any change in state.
+# Returns 0 if the log didn't exist, 1 otherwise.
+sub _readlog {
+    my $noop = $_[0];
+
+    # See if we think the log has been changed since the last time
+    # If it has, then read it in to detect state changes.
+    # This is kind of a hack but it's the only mostly-accurate way I know of.
+    my $new = main::filechanged("$JNCPATH/ncsvc.log", $LOG)
+        or return {};
+
+    # If the inode is different or the file got smaller it's a new log
+    ! $LOG || $new->{ino} != $LOG->{ino} || $new->{size} < $LOG->{size}
+        and $LOG_OFFSET = 0;
+
+    # Remember the current state, for next time
+    $LOG = $new;
+
+    # Look through the log file, starting where we left off last time
+    open(my $L, '<', "$JNCPATH/ncsvc.log");
+    if (! $L) {
+        $log->("$JNCPATH/ncsvc.log: $!");
+        return 0;
+    }
+
+    # Jump to where we last left off.  If this fails never mind, we'll
+    # just read from the beginning.
+    seek($L, $LOG_OFFSET, 0);
+
+    local $_;
+    while (defined ($_ = <$L>)) {
+        if (/\sncsvc\.info\s+Connecting\sto\b.*?\s([-.a-zA-Z0-9]+)\s+\(/) {
+            # Starting to connect
+            $CURRENT{status} = 'Connecting';
+            $CURRENT{server} = $1;
+        } elsif (/^(\d+)\..*\ssession\.info\s+Connected\s+to\b.*?\s([-.a-zA-Z0-9]+)\s+\(/) {
+            _connected($noop, $2, _cvtdate($1));
+        } elsif (/\ssession\.info\s+disconnecting\s+from\s/) {
+            $CURRENT{status} = 'Disconnecting';
+        } elsif (/\ssession\.info\s+disconnected\s+from\s/) {
+            _disconnected($noop);
+        } elsif (/^(\d+)\..*\sncphandler\.info\s+session\s+timedout\s+\(/) {
+            # We got a timeout
+            $CURRENT{timedout} = _cvtdate($1);
+        } elsif (/\ssession\.info\s+NC\s+client\s+network\s+is\s+([.0-9]+)/) {
+            # Or: /\badapter\.info\s+cip\s*=\s*([.0-9]+)\S*\s+mask/
+            $CURRENT{address} = $1;
+        }
+    }
+
+    # Save the amount of file we've already parsed
+    $LOG_OFFSET = tell($L);
+    close($L);
+
+    return 1;
+}
+
+sub _retry {
+    my $pf = _get_current_pf();
+
+    if ($pf && $pf->{retry} && $CURRENT{pwd_good} && ! $CURRENT{retrying}) {
+        $CURRENT{total_ctime} or $CURRENT{total_ctime} = $CURRENT{ctime};
+        $CURRENT{total_received} += $CURRENT{received};
+        $CURRENT{total_sent} += $CURRENT{sent};
+
+        jnc::Session->connect() and $CURRENT{retrying} = 1;
+
+    } else {
+        # We can't retry; we're really disconnected.
+        # Clear out the "total" fields.
+        $CURRENT{total_ctime} = 0;
+        $CURRENT{total_received} = $CURRENT{total_sent} = 0;
+    }
+
+    return 1;
+}
+
+sub update {
+    # If true, run in no-op mode (don't run scripts, retry, etc.)
+    my ($class, $noop) = @_;
+
+    # If there's an active pid, wait for it in case it died.
+    $PID && waitpid($PID, 1) == $PID and $PID = 0;
+
+    # Remember the current state of the session
+    my %prev = %CURRENT;
+
+    # Act on any changes to the current status
+    if (! _readlog($noop)) {
+        # No log file...
+        clean();
+        return get();
+    }
+
+    # If we have an address and we don't know the interface yet, find it
+    if ($CURRENT{address} && ! $CURRENT{iface}) {
+        foreach (split /\n\n/, `ifconfig -a`) {
+            /^(\S+)\s.*\sinet\saddr:\Q$CURRENT{address}\E/s or next;
+            $CURRENT{iface} = $1;
+            last;
+        }
+    }
+
+    # If we have an interface get the sent/received bytes values from sysfs
+    if ($CURRENT{iface}) {
+        my $d = "/sys/class/net/$CURRENT{iface}/statistics";
+        $_ = main::readfile("$d/rx_bytes");
+        if (! defined $_) {
+            $log->("Session: $d/rx_bytes: $!");
+        } else {
+            $CURRENT{received} = $_;
+        }
+        $_ = main::readfile("$d/tx_bytes");
+        if (! defined $_) {
+            $log->("Session: $d/tx_bytes: $!");
+        } else {
+            $CURRENT{sent} = $_;
+        }
+    }
+
+    # Retry if we're disconnected and we timedout since the last update
+    if ($CURRENT{status} eq 'Disconnected' && $CURRENT{timedout}) {
+        $log->("Session: Timeout detected at $CURRENT{timedout}");
+        _retry();
+        $CURRENT{timedout} = 0;
+    }
+
+    return get();
+}
+
+# Query the provided host for a certificate and return the pathname.
+# Return false if we can't get one.
+sub get_cert {
+    my ($class, $host) = @_;
+    $log->("Session: Retrieving certificate from $host");
+    my $cn = "$JNPATH/.cert.$host";
+    unlink($cn);
+    my $u = umask(0077);
+    system("cd '$JNPATH' && /bin/bash ./'$GETCERT' '$host' '$cn' >/dev/null 2>&1");
+    my $r = $?;
+    umask($u);
+
+    if ($r != 0 || ! -f $cn || -z _) {
+        $log->("Session: Retrieval failed: $r (", ($r >> 8), ')');
+        unlink($cn);
+        return undef;
+    }
+
+    return $cn;
+}
+
+# This method is used to connect: creates a session of a profile
+sub connect {
+    my ($class, $pwd, $proxy_pwd) = @_;
+
+    # We're starting a new connect; any "maybe" passwords are obsolete
+    $CURRENT{pwd_maybe} = $CURRENT{proxy_maybe} = undef;
+
+    # If the active profile is not the same as the current one, set it
+    if ($ACTIVE != $CURRENT{pfid}) {
+        $CURRENT{pfid} = $ACTIVE;
+        $CURRENT{pwd_good} = $CURRENT{proxy_good} = undef;
+        $CURRENT{total_ctime} = 0;
+        $CURRENT{total_received} = $CURRENT{total_sent} = 0;
+        $CURRENT{timedout} = $CURRENT{retrying} = 0;
+    }
+
+    # If there's no active profile we can't connect.
+    my $pf = _get_current_pf();
+    if (! $pf) {
+        $ACTIVE = 0;
+        return 0;
+    }
+
+    $log->("Session: connecting using profile $pf->{name}: $pf->{host}:$pf->{port} user $pf->{user}");
+
+    # Remember possible password info
+    # If we don't have new passwords, try the old ones
+    if ($pwd) {
+        $CURRENT{pwd_maybe} = $pwd;
+    } else {
+        $pwd = $CURRENT{pwd_good};
+    }
+    if ($proxy_pwd) {
+        $CURRENT{proxy_maybe} = $proxy_pwd;
+    } else {
+        $proxy_pwd = $CURRENT{proxy_good};
+    }
+
+    # If we don't have a password, give up
+    if (! $pwd) {
+        $log->("Session: no password available");
+        return 0;
+    }
+
+    my @cmd = ($NCSVC, '-h', $pf->{host}, '-u', $pf->{user},
+               '-r', $pf->{realm});
+    $pf->{port} and push @cmd, ('-P', $pf->{port});
+    $pf->{url}  and push @cmd, ('-U', $pf->{url});
+
+    # If we have a proxy add those arguments
+    if ($pf->{proxy}) {
+        if (! $proxy_pwd) {
+            $log->("Session: no proxy password available");
+            return 0;
+        }
+        push @cmd, ('-y', $pf->{proxy}, '-z', $pf->{proxy_port},
+                    '-d', $pf->{proxy_domain}, '-s', $pf->{proxy_user},
+                    '-a', $proxy_pwd);
+    }
+
+    my $cert = jnc::Session->get_cert($pf->{host})
+        or die "Cannot obtain VPN certificate from $pf->{host}\n";
+    push @cmd, ('-f', $cert);
+
+    return main::pwd_child($pwd, @cmd);
+}
+
+sub disconnect {
+    $log->("Session: disconnecting");
+    system($NCSVC, '-K');
+    return $? == 0;
+}
+
+package main;
+
+# --------------- WINDOW
+# Manage the main status window
+
+sub window_debug_signal {
+    my ($widget, $info) = @_;
+    print "window_debug_signal: $info\n";
+    return 0;
+}
+
+sub window_debug_event {
+    my ($widget, $event, $info) = @_;
+    print "window_debug_event: $info\n";
+    return 0;
+}
+
+sub window_state {
+    my ($w, $e, $d) = @_;
+    print "Got event $e (", Dumper($e), ")\n";
+    if ($e->new_window_state('iconified')) {
+        print "iconified!\n";
+    } elsif (! $e->new_window_state('iconified')) {
+        print "not iconified!\n";
+    }
+    return 0;
+}
+
+# Show a yes/no question.  Returns 1 for yes, 0 for no.
+sub window_yn {
+    my $w = shift;
+    my $d = Gtk2::MessageDialog->new($w, 'destroy-with-parent',
+                                     'question', 'yes-no', @_);
+    $d->show_all();
+    my $r = $d->run();
+    $d->destroy();
+    return $r eq 'yes';
+}
+
+# Show an error.  Returns 1.
+sub window_error {
+    my $w = shift;
+    my $d = Gtk2::MessageDialog->new($w, 'destroy-with-parent',
+                                     'error', 'ok', @_);
+    $d->show_all();
+    my $r = $d->run();
+    $d->destroy();
+    return 1;
+}
+
+# Show a warning.  Returns 1 on ok or 0 on cancel.
+sub window_warn {
+    my $w = shift;
+    my $d = Gtk2::MessageDialog->new($w, 'destroy-with-parent',
+                                     'warning', 'ok-cancel', @_);
+    $d->show_all();
+    my $r = $d->run();
+    $d->destroy();
+    return $r eq 'ok';
+}
+
+# Read a password and return it
+sub window_passwd {
+    my ($title, $msg) = @_;
+
+    # create a dialog window
+    my $dialog = Gtk2::Dialog->new($title, $WIN, 'destroy-with-parent',
+                                   'gtk-cancel' => 'cancel',
+                                   'gtk-ok' => 'ok');
+    $dialog->set_default_response('ok');
+    $dialog->get_content_area()->pack_start(Gtk2::Label->new($msg), 1, 0, 2);
+
+    # This is the entry box for the password
+    my $entry = Gtk2::Entry->new();
+    $entry->set_visibility(0);
+    $entry->set_invisible_char('*');
+    $entry->set_width_chars(25);
+    $entry->signal_connect(activate => sub { $dialog->response('ok') });
+    $dialog->get_content_area()->pack_start($entry, 1, 0, 2);
+
+    # Run it
+    $dialog->show_all();
+    my $r = $dialog->run();
+
+    my $pwd = $r eq 'ok' ? $entry->get_text() : undef;
+    $dialog->destroy();
+    return $pwd;
+}
+
+sub window_delete {
+    # If you return 0 in the "delete_event" signal handler,
+    # GTK will emit the "destroy" signal. Returning 1 means
+    # you don't want the window to be destroyed.
+    # This is useful for popping up 'are you sure you want to quit?'
+    # type dialogs.
+    if (jnc::Session->get_status() =~ /^Connect/) {
+        window_yn($WIN, "Exiting the application will not disconnect the VPN session.
+Do you want to continue to exit?") or return 1;
+    }
+
+    return 0;
+}
+
+# Return the name of the active profile
+# If there isn't one ask the user to choose
+sub window_choose_active {
+    # Do we have an active session?
+    my $pf = jnc::Session->get_active_pf();
+    if (! $pf) {
+        # Nothing yet
+        my @l = jnc::Profile->list();
+        if ($#l > 0) {
+            # We have >1, so let the user choose
+            my $pfn = window_choose("Choose active profile:", 'gtk-connect');
+            $pf = jnc::Profile->get($pfn) or return undef;
+        } elsif ($#l == 0) {
+            # Exactly one profile exists, just use it
+            $pf = jnc::Profile->get($l[0]);
+        } else {
+            # No profiles exist; allow the user to create one and use that
+            $pf = window_edit() or return undef;
+        }
+    }
+
+    # Return the session chosen by the user
+    jnc::Session->set_active($pf->{pfid});
+    return $pf->{name};
+}
+
+sub window_update {
+    # Note our current state so we can see if it's changed
+    my $oldstatus = jnc::Session->get_status();
+    my $vpn = jnc::Session->update();
+
+    my $server = $vpn->{server} || '---';
+
+    # If there's an active session, print info on it
+    my $pf = jnc::Session->get_active_pf();
+    if ($pf) {
+        $OBJ{frame}->set_label("Profile: $pf->{name}");
+        $server .= " ($pf->{realm})";
+    } else {
+        $OBJ{frame}->set_label('VPN Status');
+    }
+
+    # If the status changed, update that
+    my $status = $vpn->{status};
+    my $markup = "<b>$status</b>";
+    if ($markup ne $OBJ{status}->get_label()) {
+        $OBJ{status}->set_markup("<b>$status</b>");
+        if ($status =~ /^Connect/) {
+            $CONN->set_label('Disconnect');
+            $CONN->set_image($OBJ{disconnect});
+            $OBJ{disconnect}->show();
+            $CONN->set_sensitive($status eq 'Connected');
+        } else {
+            $CONN->set_label('Connect');
+            $CONN->set_image($OBJ{connect});
+            $OBJ{connect}->show();
+            $CONN->set_sensitive($status eq 'Disconnected');
+        }
+    }
+
+    $WIN->set_title($pf ? "MS-JNC: $pf->{name}"
+                    : 'MS Juniper Network Connect');
+    $OBJ{server}->set_text($server);
+    if ($status eq 'Disconnected') {
+        foreach my $k (qw(elapsed sent received address)) {
+            $OBJ{$k}->set_text('---');
+        }
+    } else {
+        $OBJ{elapsed}->set_text($vpn->{ctime} ? elapsed($vpn->{ctime}) : "---");
+        foreach my $k (qw(sent received)) {
+            $OBJ{$k}->set_text($vpn->{$k} ? cvtbytes($vpn->{$k}) : '---');
+        }
+        $OBJ{address}->set_text($vpn->{address} || "---");
+    }
+
+    return 1;
+}
+
+# Connect or disconnect
+sub window_dis_connect {
+    my $label = $CONN->get_label();
+
+    if ($label ne 'Connect') {
+        # Disconnects are simple
+        jnc::Session->disconnect();
+        goto UPDATE;
+    }
+
+    # Make sure we have a current profile
+    my $pfn = window_choose_active();
+    if (! $pfn) {
+        window_error($WIN, "You must have an active profile before you can connect.");
+        goto UPDATE;
+    }
+    my $pf = jnc::Profile->get($pfn);
+    if (! $pf) {
+        # This shouldn't ever happen...?!?!
+        window_error($WIN, "Active profile $pfn is not valid!");
+        goto UPDATE;
+    }
+
+    # Get passwords.  It works like this: if there's a previous "known good"
+    # password, then just use it without asking.  If the user saved a
+    # password that counts as a "known good" password.  If there's no
+    # "known good" password then ask for one.
+    my ($proxy_pwd, $pwd);
+    my $sess = jnc::Session->get();
+    if ($pf->{proxy}) {
+        $proxy_pwd = $pf->{proxy_passwd} || $sess->{proxy_good}
+            || window_passwd("Enter proxy password",
+                             "Enter the proxy server password:")
+            or goto UPDATE;
+    }
+    $pwd = $pf->{passwd} || $sess->{pwd_good}
+        || window_passwd("Enter password",
+                         "Enter your password or PIN+SecurID:")
+        or goto UPDATE;
+
+    # If we have what we need, start the session!
+    jnc::Session->connect($pwd, $proxy_pwd);
+
+  UPDATE:
+    window_update();
+    return 1;
+}
+
+sub window_about {
+    # Create the about content
+    my $dialog = Gtk2::Dialog->new('About MS-JNC', $WIN, 'destroy-with-parent',
+                                   'gtk-ok' => 'ok');
+    my $content = $dialog->get_content_area();
+
+    # Show the script version information
+    my $hb = Gtk2::HBox->new(0, 10);
+    $hb->pack_start(Gtk2::Image->new_from_file($JNCICON), 0, 0, 2);
+    $hb->pack_start(Gtk2::Label->new("
+MadScientist Juniper Network Connect Manager
+Version $VERSION ($RELDATE)
+$RELURL
+"), 0, 0, 2);
+    $content->pack_start_defaults($hb);
+
+    # Show the JNC version information
+    if (-x $NCSVC) {
+        $content->pack_start_defaults(Gtk2::HSeparator->new());
+
+        local $_ = `$NCSVC -v 2>&1`;
+        $? == 0 or $_ = "Failed to obtain Network Connect version\n".$_;
+        chomp;
+        my $l = Gtk2::Label->new($_);
+        $l->modify_font(Gtk2::Pango::FontDescription->from_string("Monospace 8"));
+        my $a = Gtk2::Alignment->new(0.1, 0.5, 0.0, 0.0);
+        $a->add($l);
+        $content->pack_start_defaults($a);
+    }
+
+    # Create a dialog and add the about content
+    $dialog->set_default_response('ok');
+    $dialog->show_all();
+    $dialog->run();
+    $dialog->destroy();
+    return 1;
+}
+
+# Make a window busy (if $_[1] is true) or not busy (if $_[1] is false)
+sub window_busy {
+    my ($win, $isbusy) = @_;
+
+    # I can't seem to get this to work :-/  I must be doing something wrong.
+    # It was working at first but not anymore.  Weird.
+    return 1;
+
+    if ($isbusy) {
+        print "busy\n";
+        $win->window()->set_cursor(Gtk2::Gdk::Cursor->new('watch'));
+        $win->set_sensitive(0);
+    } else {
+        print "not busy\n";
+        # The docs say I can use undef here but it gives an error on RHEL6:
+        # GLib-GObject-CRITICAL **: g_object_notify: assertion `G_IS_OBJECT (object)' failed
+        #$win->window()->set_cursor(undef);
+        $win->window()->set_cursor(Gtk2::Gdk::Cursor->new('pointer'));
+        $win->set_sensitive(1);
+    }
+
+    return 1;
+}
+
+# Check the URL field as soon as practical.  We don't, though, want
+# to check it if the user hasn't actually changed anything.
+my $OLD_URL = '';
+my $OLD_PROXY = '';
+
+sub window_url_event {
+    my ($w, $event, $d) = @_;
+    my ($edit, $pf) = @$d;
+
+    my $old_url = $OLD_URL;
+    $OLD_URL = $edit->{url}->get_text();
+
+    my $old_proxy = $OLD_PROXY;
+    $OLD_PROXY = $edit->{proxy}->get_text();
+
+    # Empty or nothing changed so keep going.
+    (! $OLD_URL && ! $OLD_PROXY)
+        || ($old_url eq $OLD_URL && $old_proxy eq $OLD_PROXY)
+        and return 0;
+
+    # If the check succeeds, keep going.  Else don't move forward.
+    # Signal return values seem backwards to me but...
+    return window_url_check($edit, $pf) == 0;
+}
+
+# Check the URL field value for validity.
+# Returns 1 if it's OK and we should move forward or 0 if not valid.
+# Note this is the opposite of signal returns (odd...)
+sub window_url_check {
+    my ($edit, $pf) = @_;
+    $pf->{host} = $pf->{port} = undef;
+
+    local $_ = $edit->{url}->get_text();
+
+    my $hostnm;
+    my $url;
+    my $fqdnre = '[a-zA-Z0-9][-.a-zA-Z0-9]*';
+    if (/^(($fqdnre)(?:(\d+))?)$/) {
+        $hostnm = $1;
+        $pf->{host} = $2;
+        $3 and $pf->{port} = $3;
+    } elsif (m,^(https?)://(($fqdnre)(?::(\d+))?).*$,) {
+        $url = $_;
+        $hostnm = $2;
+        $pf->{host} = $3;
+        $pf->{port} = $4 || getservbyname($1, 'tcp');
+    } else {
+        window_error($edit->{dialog}, "Server/URL:
+Please provide a full URL, hostname, or hostname:port.");
+        $edit->{url}->grab_focus();
+        return 0;
+    }
+
+    # See if there's a proxy set up.
+    $_ = $edit->{proxy}->get_text();
+    if ($_) {
+        if (/^(($fqdnre)(?:(\d+))?)$/) {
+            $hostnm = $1;
+            $pf->{proxy_host} = $2;
+            $3 and $pf->{proxy_port} = $3;
+        } else {
+            window_error($edit->{dialog}, "Proxy Server:
+Please provide a hostname or hostname:port.");
+            $edit->{proxy}->grab_focus();
+            return 0;
+        }
+    }
+
+    # Seems to be the proper format.  Now see if it's a valid hostname.
+    # If it's not, ask the user if they really want to use it.  If so,
+    # we return 1 (keep going).  If not, we re-select the entry box.
+
+    # Set the window to busy while we check things out
+    window_busy($edit->{dialog}, 1);
+
+    # Make sure we can resolve the hostname
+    if (! gethostbyname($pf->{host})) {
+        window_busy($edit->{dialog}, 0);
+        window_yn($edit->{dialog}, "Unknown host $hostnm
+Use it anyway?") and return 1;
+        $edit->{url}->grab_focus();
+        return 0;
+    }
+
+    # Make sure we can connect to the hostname
+    my $ok = 1;
+    my $http = getservbyname('http', 'tcp') || 80;
+    my $https = getservbyname('https', 'tcp') || 443;
+    my $ping = Net::Ping->new('tcp', 2);
+    if ($pf->{port}) {
+        # If we got a port use that
+        $ping->port_number($pf->{port});
+        $ok = $ping->ping($pf->{host});
+    } else {
+        # No port, try both https and http
+        $pf->{port} = $https;
+        $ping->port_number($pf->{port});
+        $ok = $ping->ping($pf->{host});
+        if (! $ok) {
+            $pf->{port} = $http;
+            $ping->port_number($pf->{port});
+            $ok = $ping->ping($pf->{host});
+        }
+        print "got port $pf->{port}\n";
+    }
+
+    if (! $ok) {
+        window_busy($edit->{dialog}, 0);
+        window_yn($edit->{dialog}, "$hostnm is not responding.
+Use it anyway?") and return 1;
+        $edit->{url}->grab_focus();
+        return 0;
+    }
+
+    # If we didn't get a URL from the user, construct it now.
+    $url or $url = ($pf->{port} == $https ? 'https' : 'http')
+        ."://$pf->{host}"
+        .($pf->{port} == $http || $pf->{port} == $https ? ''
+          : ":$pf->{port}");
+
+    # If we don't already have a realm value see if we can figure it out
+    if (! $edit->{realm}->get_text()) {
+        local $_ = get($url);
+        $_ && /<input\b[^>]*\sname="realm"[^>]*\svalue="(.+?)"/s
+            and $edit->{realm}->set_text($1);
+    }
+
+    if (! jnc::Session->get_cert($pf->{host})) {
+        window_busy($edit->{dialog}, 0);
+        window_yn($edit->{dialog}, "Failed to obtain certificate from $hostnm
+Use it anyway?") and return 1;
+        $edit->{url}->grab_focus();
+        return 0;
+    }
+
+    window_busy($edit->{dialog}, 0);
+    return 1;
+}
+
+# This shows the profile information dialog box
+# The first argument should be the name of the profile to edit, or
+# false to create a new profile.
+# Returns a ref to the profile data
+sub window_edit {
+    my $sname = $_[0] || '';
+    my $pf = $sname ? jnc::Profile->get($sname) : {};
+
+    # Keep all the interesting objects here
+    my %edit = ();
+
+    # Remember the previous value of the URL & proxy
+    $OLD_URL = $pf->{url} || '';
+    $OLD_PROXY = $pf->{proxy} || '';
+
+    # create a dialog window
+    $edit{dialog} = Gtk2::Dialog->new('MS Juniper Network Connect VPN Profile',
+                                      $WIN, 'destroy-with-parent',
+                                      'gtk-cancel' => 'cancel',
+                                      'gtk-ok' => 'ok');
+    $edit{dialog}->set_default_response('ok');
+
+    # These are the fields that will be on the dialog, and their titles
+    my %fields = (name => 'Name this profile',
+                  user => 'Username',
+                  passwd => 'Password',
+                  url => 'Server/URL',
+                  realm => 'Realm',
+                  proxy => 'Proxy Server',
+                  proxy_domain => 'Proxy Domain',
+                  proxy_user => 'Proxy User',
+                  proxy_passwd => 'Proxy Password');
+
+    # These are the default widths for the various fields
+    # If not here the default (20) will be used
+    my %widths = (url => 30, realm => 10, name => 30, proxy => 30);
+
+    # I wanted to check the hostname dynamically when the user is done.
+    # This is non-obvious in Gtk2 from what I can see.  The activate signal
+    # is only emitted if the user presses ENTER, but not if they TAB away or
+    # click on another entry.  However if I hook to the focus-out-event I
+    # get the event invoked every time the focus moves away, including to
+    # click cancel or to another window etc.  Since the command can take a
+    # while if the hostname lookup fails or the host is not reachable, this
+    # really sucks.
+    # Instead what I decided to do is add a trigger to the focus-in-event
+    # of all the OTHER fields.  When we enter a field we'll check to see
+    # if the URL is set and has been changed since the last time we checked.
+    # If so we'll check it.  If not we do nothing.
+    # Then we need to check it again when "OK" is pressed since we might
+    # have jumped straight from the host field to "OK" without focusing
+    # any of the other fields.
+
+    # Create the entries
+    foreach my $f (keys %fields) {
+        $edit{$f} = Gtk2::Entry->new();
+        $edit{$f}->set_width_chars($widths{$f} || 20);
+        $edit{$f}->set_text($pf->{$f} || '');
+        $edit{$f}->signal_connect('focus-in-event' => \&window_url_event,
+                                   [\%edit, $pf]);
+    }
+
+    # Create a checkbox for the auto-retry mode
+    $edit{retry} = Gtk2::CheckButton->new('Auto-reconnect:');
+    $edit{retry}->set_active($pf->{retry});
+    $edit{retry}->signal_connect('focus-in-event' => \&window_url_event,
+                                 [\%edit, $pf]);
+
+    # Create a file chooser for the script
+    $edit{script} = Gtk2::FileChooserButton->new('Session Script', 'open');
+    if ($pf->{script}) {
+        $edit{script}->set_filename($pf->{script});
+    } else {
+        $edit{script}->set_current_folder($HOME);
+    }
+    $edit{script}->signal_connect('focus-in-event' => \&window_url_event,
+                                  [\%edit, $pf]);
+
+    # Extra configuration
+    $edit{passwd}->set_visibility(0);
+    $edit{passwd}->set_invisible_char('*');
+
+    $edit{proxy_passwd}->set_visibility(0);
+    $edit{proxy_passwd}->set_invisible_char('*');
+
+    # Pack it into the dialog box
+    my $content = $edit{dialog}->get_content_area();
+
+    my ($table, $a, $frame, $top);
+
+    # Create a section for the profile name
+    my $hb = Gtk2::HBox->new(0, 10);
+    $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+    $a->add(Gtk2::Label->new("$fields{name}:"));
+    $hb->pack_start($a, 0, 0, 2);
+    $hb->pack_end($edit{retry}, 0, 0, 2);
+    $content->pack_start($hb, 0, 0, 2);
+    $content->pack_start($edit{name}, 0, 0, 2);
+
+    # Create a section for the username/password info
+    $frame = Gtk2::Frame->new('VPN Account');
+    $frame->set_label_align(0.05, 0.8);
+    $table = Gtk2::Table->new(2, 2, 0);
+    $table->set_row_spacings(2);
+    $table->set_col_spacings(2);
+    $table->set_border_width(2);
+
+    $top = 0;
+    foreach my $f (qw(user passwd)) {
+        $a = Gtk2::Alignment->new(1.0, 0.5, 0.0, 0.0);
+        $a->add(Gtk2::Label->new("$fields{$f}:"));
+        $table->attach_defaults($a, 0, 1, $top, $top+1);
+        $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+        $a->add($edit{$f});
+        $table->attach_defaults($a, 1, 2, $top, $top+1);
+        ++$top;
+    }
+
+    $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+    $a->add($table);
+    $frame->add($a);
+    $content->pack_start($frame, 0, 0, 2);
+
+    # Create a section for the servername/realm info
+    $frame = Gtk2::Frame->new('VPN Server');
+    $frame->set_label_align(0.05, 0.8);
+    $table = Gtk2::Table->new(2, 2, 0);
+    $table->set_row_spacings(2);
+    $table->set_col_spacings(2);
+    $table->set_border_width(2);
+
+    $top = 0;
+    foreach my $f (qw(url realm)) {
+        $a = Gtk2::Alignment->new(1.0, 0.5, 0.0, 0.0);
+        $a->add(Gtk2::Label->new("$fields{$f}:"));
+        $table->attach_defaults($a, 0, 1, $top, $top+1);
+        $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+        $a->add($edit{$f});
+        $table->attach_defaults($a, 1, 2, $top, $top+1);
+        ++$top;
+    }
+
+    $frame->add($table);
+    $content->pack_start($frame, 0, 0, 2);
+
+    # Create a section for the proxy info
+    $frame = Gtk2::Frame->new('VPN Proxy');
+    $frame->set_label_align(0.05, 0.8);
+    $table = Gtk2::Table->new(4, 2, 0);
+    $table->set_row_spacings(2);
+    $table->set_col_spacings(2);
+    $table->set_border_width(2);
+
+    $top = 0;
+    foreach my $f (qw(proxy proxy_domain proxy_user proxy_passwd)) {
+        $a = Gtk2::Alignment->new(1.0, 0.5, 0.0, 0.0);
+        $a->add(Gtk2::Label->new("$fields{$f}:"));
+        $table->attach_defaults($a, 0, 1, $top, $top+1);
+        $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+        $a->add($edit{$f});
+        $table->attach_defaults($a, 1, 2, $top, $top+1);
+        ++$top;
+    }
+
+    $frame->add($table);
+    $content->pack_start($frame, 0, 0, 2);
+
+    # Create a section for the session script
+    $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+    $a->add(Gtk2::Label->new("Session Script:"));
+    $content->pack_start($a, 0, 0, 2);
+    $content->pack_start($edit{script}, 0, 0, 2);
+
+    # Show it all and wait for the user to "OK"
+    $edit{dialog}->show_all();
+
+    my $orig = { %$pf };
+
+    # Let the user make changes.
+    while (1) {
+        my $r = $edit{dialog}->run();
+
+        # If the user didn't click OK then give up without saving
+        if ($r ne 'ok') {
+            $edit{dialog}->destroy();
+            return undef;
+        }
+
+        # Verify that what they entered is valid
+        window_url_check(\%edit, $pf) or next;
+
+        # Retrieve all the new entries into the profile
+        foreach my $f (keys %fields) {
+            $pf->{$f} = $edit{$f}->get_text();
+        }
+        $pf->{retry} = $edit{retry}->get_active();
+        $pf->{script} = $edit{script}->get_filename();
+
+        if (! $pf->{name}) {
+            window_error($edit{dialog}, "Please choose a name for this profile.");
+            $edit{name}->grab_focus();
+            next;
+        }
+
+        # See if the name has changed
+        if ($sname && $sname ne $pf->{name}) {
+            # We can't rename to an existing
+            if (vpn::Profile->get($pf->{name})) {
+                window_error($edit{dialog}, "Profile $pf->{name} exists.
+Please choose a different name.");
+                $edit{name}->grab_focus();
+                next;
+            }
+        }
+
+        if (! $pf->{url}) {
+            window_error($edit{dialog}, "Please provide a server hostname or URL.");
+            $edit{url}->grab_focus();
+            next;
+        }
+        if (! $pf->{realm}) {
+            window_error($edit{dialog}, "Please provide a VPN realm name.");
+            $edit{realm}->grab_focus();
+            next;
+        }
+        if (! $pf->{user}) {
+            window_error($edit{dialog}, "Please provide a username.");
+            $edit{user}->grab_focus();
+            next;
+        }
+        if ($pf->{script} && ! -x $pf->{script}) {
+            window_error($edit{dialog}, "The script $pf->{script} must be executable");
+            $edit{script}->grab_focus();
+            next;
+        }
+
+        if ($pf->{passwd} || $pf->{proxy_passwd}) {
+            if (! window_warn($edit{dialog},
+                             "Passwords are stored in plain text!
+For security leave them blank; you'll be asked
+to enter the password on connection.")) {
+                my $f = $pf->{passwd} ? 'passwd' : 'proxy_passwd';
+                $edit{$f}->grab_focus();
+                next;
+            }
+        }
+
+        # Seems OK
+        last;
+    }
+
+    $edit{dialog}->destroy();
+
+    $sname or return jnc::Profile->new($pf);
+    return $sname eq $pf->{name}
+            ? jnc::Profile->set($pf)
+            : jnc::Profile->rename($sname, $pf);
+}
+
+# Create a combobox containing the various profiles to choose from
+sub window_mk_chooser {
+    my $cbox = Gtk2::ComboBox->new_text();
+    my $pfn = jnc::Profile->get_default();
+    my $idx = 0;
+    foreach (sort jnc::Profile->list()) {
+        $cbox->append_text($_);
+        $pfn && $pfn eq $_ and $cbox->set_active($idx);
+        ++$idx;
+    }
+    $pfn or $cbox->set_active(0);
+
+    return $cbox;
+}
+
+# Pop up a dialog to choose a profile.  Returns the profile name.
+sub window_choose {
+    my ($title, $stock) = @_;
+
+    # Make a dialog to contain the chooser
+    my $dialog = Gtk2::Dialog->new('Choose Profile',
+                                   $WIN, 'destroy-with-parent',
+                                   'gtk-cancel' => 'cancel',
+                                   $stock => 'ok');
+    $dialog->set_default_response('ok');
+    my $cbox = window_mk_chooser();
+    my $c = $dialog->get_content_area();
+    $c->pack_start(Gtk2::Label->new($title), 0, 0, 2);
+    $c->pack_start($cbox, 0, 0, 2);
+
+    $dialog->show_all();
+    my $r = $dialog->run();
+    my $pfn = $r eq 'ok' ? $cbox->get_active_text() : undef;
+    $dialog->destroy();
+
+    return $pfn;
+}
+
+# Manage profiles
+sub window_manage {
+    my $cmd = shift;
+
+    # New... just do it.
+    $cmd eq 'new' and return window_edit(undef);
+
+    # Get a profile to manage
+    my $pfn = window_choose(
+            $cmd eq 'delete' ? ('Choose profile to delete:', 'gtk-delete')
+            : $cmd eq 'edit' ? ('Choose profile to edit:', 'gtk-edit')
+            : $cmd eq 'current' ? ('Choose profile to use:', 'gtk-apply')
+            : ('Choose the default profile:', 'gtk-apply'))
+        or return 0;
+
+    $cmd eq 'default' and return jnc::Profile->set_default($pfn);
+    $cmd eq 'delete'  and return jnc::Profile->remove($pfn);
+    if ($cmd eq 'current') {
+        my $pf = jnc::Profile->get($pfn);
+        return jnc::Session->set_active($pf->{pfid});
+    }
+
+    # Edit
+    return window_edit($pfn);
+}
+
+sub window_create {
+    my $window = Gtk2::Window->new('toplevel');
+    $window->set_border_width(10);
+    $window->set_title('MS Juniper Network Connect');
+    $window->set_default_icon_from_file($JNCICON);
+
+    # Handle WM delete events
+    $window->signal_connect(delete_event => \&window_delete);
+    $window->signal_connect(destroy => sub { Gtk2->main_quit(); });
+
+    # Create a vbox to hold the window content
+    my $vb = Gtk2::VBox->new(0, 2);
+
+    # Create the File menu
+    my $caction = 0;
+    my $menudata = [
+        _File => {
+            item_type => '<Branch>',
+            children => [
+                _Quit => {
+                    callback => sub { window_delete() or Gtk2->main_quit(); },
+                    callback_action => ++$caction,
+                    accelerator => '<ctrl>Q'
+                } ],
+        },
+        _Profiles => {
+            item_type => '<Branch>',
+            children => [
+                _Current => {
+                    callback => \&window_manage,
+                    callback_data => 'current',
+                    callback_action => ++$caction
+                },
+                Separator => {
+                    item_type => '<Separator>'
+                },
+                _New => {
+                    callback => \&window_manage,
+                    callback_data => 'new',
+                    callback_action => ++$caction
+                },
+                Default => {
+                    callback => \&window_manage,
+                    callback_data => 'default',
+                    callback_action => ++$caction
+                },
+                _Edit => {
+                    callback => \&window_manage,
+                    callback_data => 'edit',
+                    callback_action => ++$caction
+                },
+                _Delete => {
+                    callback => \&window_manage,
+                    callback_data => 'delete',
+                    callback_action => ++$caction
+                } ],
+        },
+        _Help => {
+            item_type => '<Branch>',
+            children => [
+                _About => {
+                    callback => \&window_about,
+                    callback_action => ++$caction
+                } ]
+        }
+        ];
+    my $menu = Gtk2::SimpleMenu->new(menu_tree => $menudata)
+        or die "Failed to create menu\n";
+
+    $vb->pack_start($menu->{widget}, 0, 0, 0);
+    $window->add_accel_group($menu->{accel_group});
+
+    %OBJ = ();
+
+    # Create "connected" and "disconnected" stock images
+    $OBJ{connect} = Gtk2::Image->new_from_stock('gtk-connect', 'button');
+    $OBJ{disconnect} = Gtk2::Image->new_from_stock('gtk-disconnect', 'button');
+
+    # Create a table inside a frame to hold the status
+    my $sframe = Gtk2::Frame->new('VPN Status');
+    $sframe->set_label_align(0.05, 0.8);
+    $OBJ{frame} = $sframe;
+
+    my $status = Gtk2::Table->new(6, 2, 0);
+    $status->set_row_spacings(2);
+    $status->set_col_spacings(20);
+    $status->set_border_width(2);
+
+    # Add in the first column
+    my $top = 0;
+    foreach my $l (qw(Status: Server: Address: Duration: Sent: Received:)) {
+        my $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+        $a->add(Gtk2::Label->new($l));
+        $status->attach_defaults($a, 0, 1, $top, $top+1);
+        ++$top;
+    }
+
+    # Add in the second column
+    $top = 0;
+    foreach my $k (qw(status server address elapsed sent received)) {
+        my $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+        $OBJ{$k} = Gtk2::Label->new("");
+        $a->add($OBJ{$k});
+        $status->attach_defaults($a, 1, 2, $top, $top+1);
+        ++$top;
+    }
+
+    # Add the status to the frame
+    $sframe->add($status);
+
+    # Add the frame to the vbox
+    $vb->pack_start_defaults($sframe);
+
+    # Create a button to connect/disconnect
+    $CONN = Gtk2::Button->new();
+    $CONN->set_label('Connect');
+    $CONN->set_image($OBJ{connect});
+    $OBJ{connect}->show();
+    $CONN->signal_connect(clicked => \&window_dis_connect);
+    $vb->pack_start_defaults($CONN);
+
+    # Add the table to the window
+    $window->add($vb);
+
+    $window->show_all();
+    $WIN = $window;
+
+    return $window;
+}
+
+# --------------- SETUP
+# If Network Connect is already available then obtain the "active" info
+# If Network Connect is not set up yet, do that
+
+# Run a command via sudo, passing the password via stdin.
+sub sudo {
+    my $pwd = shift;
+    return pwd_child({wait => 1}, $pwd, qw(sudo -S /bin/sh -c), "@_");
+}
+
+# This runs the given command with superuser privileges.
+# It may require a password dialog so WIN must exist.
+my $PWD_sudo = undef;
+my $PWD_su = undef;
+sub asroot {
+    # If we are root we can just run it
+    if ($< == 0) {
+        print "Running: @_\n" if $debug;
+        system(@_);
+        return $? == 0;
+    }
+
+    # If not root and we have no sudo password try to get one
+    while (! $PWD_sudo) {
+        $PWD_sudo = window_passwd("Enter Password", "Enter your password");
+        sudo($PWD_sudo, 'id -u') and last;
+        $PWD_sudo = undef;
+        # If they want to give up go to the next method
+        window_yn($WIN, "Bad password or this account doesn't have admin privileges.
+Retry the password entry?") or last;
+    }
+
+    # If we have a password, run the command
+    $PWD_sudo and return sudo($PWD_sudo, @_);
+
+    # If no sudo, use su(1).  Su is so lame that we can't give it a password
+    # unless we have a terminal.  I could have used Expect but forget it;
+    # just run it in an xterm like Juniper does.
+    print "Running: xterm -e 'su -c '@_''\n" if $debug;
+    system(qw(xterm -e), "echo Enter the root password; su -c '@_'");
+    # Feh.  xterm doesn't propogate the exit code of the shell command.
+    # This is useless.
+    return $? == 0;
+}
+
+# Set up the initial pathnames.  Note they may not exist!
+sub setpaths {
+    # Find the user's home directory
+    $HOME = $ENV{HOME};
+    if (! $HOME || ! -d $HOME) {
+        $HOME = (getpwuid($>))[7];
+        $HOME && -d $HOME or die "No home directory found!\n";
+    }
+
+    $JNPATH = "$HOME/.juniper_networks";
+    $JNCPATH = "$JNPATH/network_connect";
+    $NCSVC = "$JNCPATH/ncsvc";
+    $JNCICON = "$JNPATH/networkconnect.gif";
+}
+
+sub setup {
+    my $opts = shift;
+
+    local $_;
+
+    # Don't run as root
+    !$opts->{root} && $< == 0
+        and die "This utility should not be run as root.  Please run it directly.\n";
+
+    # Find the JNC content
+    if (! -d $JNPATH) {
+        system(qw(mkdir -p), $JNPATH);
+        $? == 0 or die "Failed to create $JNPATH\n";
+    }
+
+    # Did the user give one?
+    my $jar = "$JNPATH/ncLinuxApp.jar";
+    my $jopt = $opts->{jarfile};
+    if ($jopt && $jopt ne $jar) {
+        # Do we have one already?
+        -f $jar and die "$jar exists: cannot use --jarfile $jopt\n";
+        -f $jopt && -r _ or die "$jopt: $!\n";
+        copy($jopt, $jar) or die "Failed to copy $jopt to $jar\n";
+    } else {
+        # Can we find one?
+        -f "$jar" && -r _
+            or die "$jar: $!\nJuniper Network Connect is not installed!\n";
+    }
+
+    # Do we have a directory for it?  Make it
+    if (! -d $JNCPATH) {
+        system(qw(mkdir -p), $JNCPATH);
+        $? == 0 or die "Failed to create directory $JNCPATH\n";
+    }
+
+    # Is it unpacked?  If not, do that now
+    if (! -f $NCSVC) {
+        system("cd '$JNCPATH' && unzip -q '$jar'");
+        $? == 0 or die "Failed to unpack $jar\n";
+        -f $NCSVC or die "Malformed Network Connect file $jar (no ncsvc)\n";
+        chmod 0755, $NCSVC,
+            "$JNCPATH/ncdiag", "$JNCPATH/installNC.sh", "$JNCPATH/xlaunchNC.sh";
+    }
+
+    # If the getcert script is not available obtain it
+    # It seems to sometimes disappear from the network_connect directory
+    if (! -f "$JNPATH/$GETCERT") {
+        my $tmp = "$JNCPATH/$GETCERT";
+        if (! -f $tmp) {
+            my $td = tempdir(CLEANUP => 1);
+            system("cd '$td' && unzip -q '$jar' $GETCERT");
+            $? == 0 && -f "$td/$GETCERT"
+                or die "Malformed Network Connect file $jar (no $GETCERT)\n";
+            $tmp = "$td/$GETCERT";
+        }
+
+        # Somehow this file sometimes disappears; keep it
+        copy($tmp, "$JNPATH/$GETCERT") or die "copy $GETCERT failed: $!\n";
+    }
+
+    # Make sure we have an icon file.  If not unpack it
+    if (! -f $JNCICON) {
+        -f "$JNCPATH/NC.jar" or die "$JNCPATH/NC.jar: $!
+Invalid installation of Juniper Network Connect!\n";
+        my $gif = `unzip -p -q '$JNCPATH/NC.jar' networkconnect.gif`;
+        $? == 0 && $gif or die "Failed to extract icon from $JNCPATH/NC.jar\n";
+        open(my $I, '>', $JNCICON)
+            or die "open: $JNCICON: $!
+Failed to create Juniper Network Connect icon file.\n";
+        print $I $gif;
+        close($I) or die "close: $JNCICON: $!
+Failed to create Juniper Network Connect icon file.\n";
+        chmod 0644, $JNCICON;
+    }
+
+    # Make sure we have a FreeDesktop applicaton file, or create it
+    my $deskdir = "$HOME/.local/share/applications";
+    if (! -d $deskdir) {
+        system(qw(mkdir -p), $deskdir);
+        $? == 0 or die "Failed to create $deskdir\n";
+    }
+    my $deskfile = "$deskdir/ms-jnc.desktop";
+    if (! -f $deskfile) {
+        $_ = $DESKTOP;
+        s/\@\@ICON\@\@/$JNCICON/gs;
+        s/\@\@CMD\@\@/$0/gs;
+        open(my $D, '>', $deskfile)
+            or die "open: $deskfile: $!
+Failed to create application definition.\n";
+        print $D $_;
+        close($D) or die "close: $deskfile: $!
+Failed to create application definition.\n";
+    }
+
+    return 1;
+}
+
+# Returns the set of commands needed to be run to fix the application
+# permissions, or empty if it's all good.
+sub check_app {
+    # Collect all the operations we need to run as root into a shell command
+    my @cmd = ();
+
+    # Make sure the ncsvc app has the right privileges
+    my @s = stat($NCSVC) or die "$NCSVC: $!\n";
+    $s[4] == 0 && $s[5] == 0
+        or push @cmd, "chown 0:0 '$NCSVC'";
+
+    ($s[2] & 07777) == 06711
+        or push @cmd, "chmod 06711 '$NCSVC'";
+
+    # First make sure there's a TUN device: it has been reported that
+    # Knoppix, for example, doesn't provide one by default
+    if (! -c '/dev/net/tun') {
+        window_yn($WIN, "There is no TUN device available.
+Should I create one?")
+            or exit(0);
+
+        push @cmd, 'mknod /dev/net/tun c 10 200 && chmod 0666 /dev/nut/tun';
+    }
+
+    # Do we need to do something as root?
+    return @cmd ? 'r=0'.join('', map {"; $_ || r=1"} @cmd).'; exit $r' : '';
+}
+
+# This function verifies that the tools are setuid and if not, sets them It
+# will need to get a password so it should not be invoked until after the
+# window is created.
+sub setup_app {
+    my $cmd = check_app() or return 1;
+
+    # We need to fix something, do it as root.
+    $log->("JNC configuration required: $cmd");
+    asroot($cmd);
+
+    # Unfortunately we cannot rely on the exit codes of all the commands
+    # (xterm, I'm looking at you!)  So instead after we run it, see if
+    # there's anything left to do and fail if so.
+    check_app()
+        and die "Failed to configure the Network Connect application\n";
+
+    return 1;
+}
+
+sub get_one_passwd_tty {
+    my $prompt = shift;
+
+    # Get the new password
+    $SIG{'INT'} = 'IGNORE';
+    system(qw(stty -echo));
+    $? == 0 or die "Cannot disable character printing.\n";
+    print "$prompt: ";
+    my $pwd = <STDIN>;
+    print "\n";
+    system(qw(stty echo));
+    $SIG{'INT'} = 'DEFAULT';
+    $? == 0 or die "Cannot enable character printing.\n";
+    $pwd =~ /^(.*)$/;
+    $1 or die "No password provided.  Stop.\n";
+    return $1;
+}
+
+sub get_passwd_tty {
+    my $pf = shift;
+
+    my $pwd = $pf->{passwd} || get_one_passwd_tty("Enter your password or PID+SecureID");
+    my $proxy_pwd = $pf->{proxy} ? $pf->{proxy_passwd} || get_one_passwd_tty("Enter the proxy password") : '';
+    return ($pwd, $proxy_pwd);
+}
+
+# --------------- MAIN
+
+# Get the various pathnames we'll expect.  Note they may not exist yet!
+setpaths();
+
+# Parse the command line
+GetOptions(\%OPTS,
+           'help|h|?' => sub { Getopt::Long::HelpMessage(); },
+           'version|V' => \&version,
+           'jarfile=s', 'profile=s', 'root', 'fg', 'connect',
+           'disconnect', 'uninstall')
+    or exit(1);
+
+# Initialize the VPN status
+jnc::Session->clean();
+
+$log->("MadScientist Juniper Network Connect $VERSION ($RELDATE)");
+
+# If we want to disconnect the current session, do it before we create a window
+if ($OPTS{disconnect}) {
+    -x $NCSVC and jnc::Session->disconnect();
+    exit(0);
+}
+
+# If we want to uninstall, do it now
+if ($OPTS{uninstall}) {
+    print "Uninstall Juniper Network Connect
+Removing $JNPATH.
+This operation *CANNOT BE UNDONE*.
+Are you sure you want to proceed (enter 'yes')? ";
+    my $a = <STDIN>;
+    $a and $a eq "yes\n" or die "Stop.\n";
+    $log->("Uninstalling Juniper Network Connect\n");
+    system(qw(rm -rf), $JNPATH);
+    $? == 0 or die "Failed.\n";
+    exit(0);
+}
+
+# Set up
+setup(\%OPTS);
+
+# Initialize the current session
+jnc::Session->update(1);
+
+# If the user wants to start with a certain profile, do that
+my $pf;
+if ($OPTS{profile}) {
+    $pf = jnc::Profile->get($OPTS{profile})
+        or die "No such profile: $OPTS{profile}\n";
+    jnc::Session->set_active($pf->{pfid});
+} else {
+    my $pfn = jnc::Profile->get_default();
+    if (! $pfn) {
+        # There's no default.  If exactly one profile exists use that
+        my @l = jnc::Profile->list();
+        $#l == 0 and $pfn = $l[0];
+    }
+    $pf = jnc::Profile->get($pfn);
+    $pf and jnc::Session->set_active($pf->{pfid});
+}
+
+# If the connect option is given, do it now
+if ($OPTS{connect}) {
+    jnc::Session->get_status() =~ /^Connect/
+        and die "A Juniper Network Connect VPN session is already active.\n";
+    $pf or die "Please specify a profile to use for the connection.\n";
+    # Turn off all buffering
+    select STDERR; $| = 1;
+    select STDOUT; $| = 1;
+    my @pwds = get_passwd_tty($pf);
+    print "Connecting to $pf->{host} ($pf->{realm}) ...";
+    jnc::Session->connect(@pwds);
+    my $e = time() + 60;
+    while (time() < $e) {
+        jnc::Session->update();
+        if (jnc::Session->get_status() eq 'Connected') {
+            print " done\n";
+            exit(0);
+        }
+        sleep(2);
+        print ".";
+    }
+    print " failed\n";
+    die "The Juniper Network Connect VPN session did not start.\n";
+}
+
+# If we want to run in the background, do that now
+if (! $OPTS{fg}) {
+    # Change to a new process group
+    setsid();
+
+    # Fork a new process
+    my $pid = fork();
+    defined $pid && $pid >= 0 or die "fork: $!\n";
+
+    # In the parent we don't want to do anything: just exit
+    $pid == 0 or _exit(0);
+
+    # In the child, redirect IO since we're in the background
+    # Closing these instead has unpleasant side-effects later
+    open(my $N, '>', '/dev/null');
+    open(STDOUT, '>&', $N);
+    open(STDERR, '>&', $N);
+    open(STDIN, '<&', $N);
+    close($N);
+}
+
+# Create the main window
+window_create();
+
+# Update the content
+window_update();
+
+# Now make sure the application is installed properly.
+setup_app() or die "Failed to configure the Network Connect application.\n";
+
+# Set a timer to go off once every second to update the window
+my $t = Glib::Timeout->add(1 * 1000, \&window_update, undef);
+
+# If there's no existing profile (first run?) let the user create one
+# This will happen when the user asks to connect
+#jnc::Session->get_status() ne 'Connected' && ! scalar(jnc::Profile->list())
+#    and window_edit();
+
+Gtk2->main();
+
+exit(0);
+
+=head1 NAME
+
+msjnc -- MadScientist Juniper Network Connect VPN Session Manager
+
+=head1 SYNOPSIS
+
+ msjnc [--help] [--version]
+ msjnc [--fg] [--profile <p>] [--root] [--jarfile <f>] [--connect]
+ msjnc [--disconnect]
+ msjnc [--uninstall]
+
+=head1 DESCRIPTION
+
+This application starts and stops the Juniper Network Connect VPN sessions
+without using your web browser or requiring Java.  It provides a standard
+GNU/Linux desktop application menu entry.  It supports multiple profiles.
+
+It will install and configure the VPN software if necessary; however you
+must have obtained the software yourself.  That software is not included.
+
+If the application detects an active Juniper Network Connect VPN session
+when it starts, it will begin to monitor that session and you can control it
+via the appliance.  Also you can exit the application without shutting down
+the VPN session; however note that when the application is not running, no
+session change scripts will be invoked.
+
+=head2 Options
+
+=over 4
+
+=item B<--help>
+
+This help text.
+
+=item B<--version>
+
+Show the version of the utility.
+
+=item B<--jarfile> I<jar>
+
+If Juniper Network Connect is not installed, install it from this JAR file.
+
+=item B<--profile> I<p>
+
+Make profile I<p> active, rather than the default profile.
+
+=item B<--root>
+
+Allow root to start the VPN.
+
+=item B<--disconnect>
+
+Bring down any existing VPN connection.
+
+=item B<--fg>
+
+Run in the foreground instead of the background.
+
+=item B<--uninstall>
+
+Delete the local configuration AND uninstall Juniper Network Connect
+You will have to reinstall it from scratch.
+
+=back
+
+=head1 PROFILES
+
+The application maintains a set of profiles that can be used to log into one
+or more Juniper Network Connect VPN services.  Each profile consists of the
+following information:
+
+=over 4
+
+=item B<Name>
+
+A name for the profile.  You can choose this name as you like: it is not
+provided to the VPN server.  It's only for local identification.  This is
+required and must be unique between all profiles.
+
+=item B<User>
+
+The login username for the VPN server.  This is required.
+
+=item B<Password>
+
+The password for the VPN server.  If you use an RSA key you cannot provide
+this since your "password" changes constantly.  Further, any passwords are
+stored I<in plaintext> in the profile storage file.  This is very insecure
+so I recommend that you do not specify a password as part of the profile.
+
+If the profile has no password, it will be requested each time you start the
+application.  As long as the password is running and you don't change your
+profile, the password will be remembered until you exit the application.
+
+=item B<Server/URL>
+
+The VPN server name or IP address, or full URL.  If you need to specify a
+port, append it to the name or IP address preceded by a colon (e.g.,
+I<hostname>:I<port>).  This is required.
+
+=item B<Realm>
+
+Juniper Network Connect requires a "realm" identifier.  When you enter the
+server information it will try to retrieve the realm from the server.  Where
+this is not possible (for example, the server supports multiple realms or
+has a non-standard way of detecting the realm) you will need to enter the
+value.
+
+=item B<Proxy>
+
+The proxy information is used only if you need a proxy.  I'm not familiar
+with this, so I don't have much else to say.  Note that the proxy password
+is treated the same way as the normal password (stored in plaintext, etc.)
+
+=item B<Session Script>
+
+The application allows you to define a script that will be invoked when the
+connection transitions from connected to disconnected, and vice versa.  Note
+that this only works if the application is up and running when the operation
+occurs.  If you exit the application then the script will not run.
+
+The script will be invoked with a single argument, either C<connected> or
+C<disconnected>.  Additional information will be provided via the
+environment variables beginning with C<jnc_*>: C<jnc_profile>, C<jnc_url>,
+C<jnc_host>, C<jnc_port>, C<jnc_realm>, C<jnc_user>, C<jnc_proxy>,
+C<jnc_proxy_port>, C<jnc_proxy_domain>, C<jnc_proxy_user>.
+
+=back
+
+=head1 AUTHOR
+
+ Paul Smith <paul@mad-scientist.net>
+ http://mad-scientist.net/juniper.html
+
+=head1 COPYRIGHT
+
+Copyright 2008-2012 Paul D. Smith <paul@mad-scientist.net>
+
+This program is free software; you can redistribute it and/or modify it
+under th e terms of the Perl Artistic License or the GNU General Public
+License as published by the Free Software Foundation; either version 2 of
+the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+more details.
+
+If you do not have a copy of the GNU General Public License write to the
+Free Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+
+=cut
