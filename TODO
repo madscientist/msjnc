@@ -1,0 +1,12 @@
+                                                                     -*-Text-*-
+
+* Add an option to turn off updating of /etc/resolv.conf
+* Add log file viewer windows
+* We try to keep stats across multiple retries but those are not displayed
+  currently.
+* If we detect multiple REALM values in a <select...> item, turn it into
+  an editable drop-down list in the profile editor screen.  An example:
+    <select size="1" name="realm">
+      <option value="One">One</option>
+      <option value="Two">Two</option>
+    </select>
