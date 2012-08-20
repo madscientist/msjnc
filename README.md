@@ -1,4 +1,4 @@
-msjnc -- MadScientist Juniper Network Connect Session Manager
+msjnc -- MadScientist JNC Session Manager
 =============================================================
 
 This script manages the Juniper Network Connect VPN service.  It is a
@@ -16,4 +16,4 @@ the command line.
 Full documentation is available by running `perldoc msjnc`.
 
 -------------------------
-[![Flattr this git repo](http://api.flattr.com/button/flattr-badge-large.png)](https://flattr.com/submit/auto?user_id=madscientist&url=https://github.com/madscientist/msjnc&title=MadScientist Juniper Network Connect Session Manager&language=&tags=github&category=software)
+[![Flattr this git repo](http://api.flattr.com/button/flattr-badge-large.png)](https://flattr.com/submit/auto?user_id=madscientist&url=https://github.com/madscientist/msjnc&title=MadScientist JNC Session Manager&language=&tags=github&category=software)

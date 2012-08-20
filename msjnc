@@ -2,7 +2,7 @@
 #
 my $C = 'Copyright 2008-2012 Paul D. Smith <paul@mad-scientist.net>';
 #
-# MadScientist Juniper Network Connect Session Manager
+# MadScientist JNC Session Manager
 # I know this script is really long, but it turns out doing anything
 # with a GUI takes a lot of--mostly grunt-work--code.  Fun!
 #
@@ -104,7 +104,7 @@ Exec=@@CMD@@ --disconnect';
 
 # Print version info
 sub version {
-    print "MadScientist Juniper Network Connect Session Manager
+    print "MadScientist JNC Session Manager
 Version $VERSION -- $RELDATE
 $RELURL\n";
 
@@ -937,7 +937,7 @@ sub window_update {
     }
 
     $WIN->set_title($pf ? "MS-JNC: $pf->{name}"
-                    : 'MS Juniper Network Connect');
+                    : 'MS JNC');
     $OBJ{server}->set_text($server);
     if ($status eq 'Disconnected') {
         foreach my $k (qw(elapsed sent received address)) {
@@ -1012,7 +1012,7 @@ sub window_about {
     my $hb = Gtk2::HBox->new(0, 10);
     $hb->pack_start(Gtk2::Image->new_from_file($JNCICON), 0, 0, 2);
     $hb->pack_start(Gtk2::Label->new("
-MadScientist Juniper Network Connect Session Manager
+MadScientist JNC Session Manager
 Version $VERSION ($RELDATE)
 $RELURL
 "), 0, 0, 2);
@@ -1219,7 +1219,7 @@ sub window_edit {
     $OLD_PROXY = $pf->{proxy} || '';
 
     # create a dialog window
-    $edit{dialog} = Gtk2::Dialog->new('MS Juniper Network Connect VPN Profile',
+    $edit{dialog} = Gtk2::Dialog->new('MS JNC VPN Profile',
                                       $WIN, 'destroy-with-parent',
                                       'gtk-cancel' => 'cancel',
                                       'gtk-ok' => 'ok');
@@ -1554,7 +1554,7 @@ sub window_manage {
 sub window_create {
     my $window = Gtk2::Window->new('toplevel');
     $window->set_border_width(10);
-    $window->set_title('MS Juniper Network Connect');
+    $window->set_title('MS JNC');
     $window->set_default_icon_from_file($JNCICON);
 
     # Handle WM delete events
@@ -1927,7 +1927,7 @@ GetOptions(\%OPTS,
 # Initialize the VPN status
 jnc::Session->clean();
 
-$log->("MadScientist Juniper Network Connect Session Manager $VERSION ($RELDATE)");
+$log->("MadScientist JNC Session Manager $VERSION ($RELDATE)");
 
 # If we want to disconnect the current session, do it before we create a window
 if ($OPTS{disconnect}) {
@@ -2041,7 +2041,7 @@ exit(0);
 
 =head1 NAME
 
-msjnc -- MadScientist Juniper Network Connect Session Manager
+msjnc -- MadScientist JNC Session Manager
 
 =head1 SYNOPSIS
 

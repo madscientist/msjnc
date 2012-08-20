@@ -1,0 +1,9 @@
+2012-08-20  Paul Smith  <psmith@gnu.org>
+
+	* Release 2.0
+
+2012-08-20  Paul Smith  <paul@mad-scientist.net>
+
+	* msjnc: Rewrite junipernc in Perl/GTK2.
+	Add many new features and capabilities.
+	See the perldoc documentation for a full description.
