@@ -2,7 +2,7 @@
 #
 my $C = 'Copyright 2008-2012 Paul D. Smith <paul@mad-scientist.net>';
 #
-# MadScientist Juniper Network Connect UI
+# MadScientist Juniper Network Connect Session Manager
 # I know this script is really long, but it turns out doing anything
 # with a GUI takes a lot of--mostly grunt-work--code.  Fun!
 #
@@ -38,7 +38,7 @@ more details.';
 # and use "XXXX" (no quotes) as the realm value.
 
 my $VERSION = '2.0';
-my $RELDATE = '15 Jul 2012';
+my $RELDATE = '20 Aug 2012';
 my $RELURL  = 'http://mad-scientist.net/juniper.html';
 
 my $debug = 0;
@@ -85,7 +85,7 @@ my $CONN;
 
 my $DESKTOP = '[Desktop Entry]
 Name=Network Connect
-Comment=MadScientist Juniper Network Connect VPN
+Comment=MadScientist Juniper Network Connect Session Manager
 Type=Application
 Terminal=false
 StartupNotify=false
@@ -104,7 +104,7 @@ Exec=@@CMD@@ --disconnect';
 
 # Print version info
 sub version {
-    print "MadScientist Juniper Network Connect Manager
+    print "MadScientist Juniper Network Connect Session Manager
 Version $VERSION -- $RELDATE
 $RELURL\n";
 
@@ -572,13 +572,15 @@ sub _readlog {
         return 0;
     }
 
+    my %prev =%CURRENT;
+
     # Jump to where we last left off.  If this fails never mind, we'll
     # just read from the beginning.
     seek($L, $LOG_OFFSET, 0);
 
     local $_;
     while (defined ($_ = <$L>)) {
-        if (/\sncsvc\.info\s+Connecting\sto\b.*?\s([-.a-zA-Z0-9]+)\s+\(/) {
+        if (/\sncsvc\.info\s+Connecting\s+to\b.*?\s([-.a-zA-Z0-9]+)(:[0-9]+)?\s+\(/) {
             # Starting to connect
             $CURRENT{status} = 'Connecting';
             $CURRENT{server} = $1;
@@ -723,15 +725,15 @@ sub connect {
 
     $log->("Session: connecting using profile $pf->{name}: $pf->{host}:$pf->{port} user $pf->{user}");
 
-    # Remember possible password info
+    # Remember possible password info, if SecurID is not set
     # If we don't have new passwords, try the old ones
     if ($pwd) {
-        $CURRENT{pwd_maybe} = $pwd;
+        $pf->{securid} or $CURRENT{pwd_maybe} = $pwd;
     } else {
         $pwd = $CURRENT{pwd_good};
     }
     if ($proxy_pwd) {
-        $CURRENT{proxy_maybe} = $proxy_pwd;
+        $pf->{securid} or $CURRENT{proxy_maybe} = $proxy_pwd;
     } else {
         $proxy_pwd = $CURRENT{proxy_good};
     }
@@ -911,7 +913,7 @@ sub window_update {
     my $pf = jnc::Session->get_active_pf();
     if ($pf) {
         $OBJ{frame}->set_label("Profile: $pf->{name}");
-        $server .= " ($pf->{realm})";
+        $vpn->{server} and $server .= " ($pf->{realm})";
     } else {
         $OBJ{frame}->set_label('VPN Status');
     }
@@ -1010,7 +1012,7 @@ sub window_about {
     my $hb = Gtk2::HBox->new(0, 10);
     $hb->pack_start(Gtk2::Image->new_from_file($JNCICON), 0, 0, 2);
     $hb->pack_start(Gtk2::Label->new("
-MadScientist Juniper Network Connect Manager
+MadScientist Juniper Network Connect Session Manager
 Version $VERSION ($RELDATE)
 $RELURL
 "), 0, 0, 2);
@@ -1264,10 +1266,16 @@ sub window_edit {
     }
 
     # Create a checkbox for the auto-retry mode
-    $edit{retry} = Gtk2::CheckButton->new('Auto-reconnect:');
+    $edit{retry} = Gtk2::CheckButton->new('Auto-reconnect');
     $edit{retry}->set_active($pf->{retry});
     $edit{retry}->signal_connect('focus-in-event' => \&window_url_event,
                                  [\%edit, $pf]);
+
+    # Create a checkbox for the SecurID mode
+    $edit{securid} = Gtk2::CheckButton->new('SecurID');
+    $edit{securid}->set_active($pf->{securid});
+    $edit{securid}->signal_connect('focus-in-event' => \&window_url_event,
+                                   [\%edit, $pf]);
 
     # Create a file chooser for the script
     $edit{script} = Gtk2::FileChooserButton->new('Session Script', 'open');
@@ -1308,16 +1316,34 @@ sub window_edit {
     $table->set_col_spacings(2);
     $table->set_border_width(2);
 
-    $top = 0;
-    foreach my $f (qw(user passwd)) {
-        $a = Gtk2::Alignment->new(1.0, 0.5, 0.0, 0.0);
-        $a->add(Gtk2::Label->new("$fields{$f}:"));
-        $table->attach_defaults($a, 0, 1, $top, $top+1);
-        $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
-        $a->add($edit{$f});
-        $table->attach_defaults($a, 1, 2, $top, $top+1);
-        ++$top;
-    }
+    $a = Gtk2::Alignment->new(1.0, 0.5, 0.0, 0.0);
+    $a->add(Gtk2::Label->new("$fields{user}:"));
+    $table->attach_defaults($a, 0, 1, 0, 1);
+    $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+    $a->add($edit{user});
+    $table->attach_defaults($a, 1, 2, 0, 1);
+
+    $a = Gtk2::Alignment->new(1.0, 0.5, 0.0, 0.0);
+    $a->add(Gtk2::Label->new("$fields{passwd}:"));
+    $table->attach_defaults($a, 0, 1, 1, 2);
+
+    $hb = Gtk2::HBox->new(0, 10);
+    $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+    $a->add($edit{passwd});
+    $hb->pack_start($a, 0, 0, 2);
+    $hb->pack_end($edit{securid}, 0, 0, 2);
+    $table->attach_defaults($hb, 1, 2, 1, 2);
+
+    # $top = 0;
+    # foreach my $f (qw(user passwd)) {
+    #     $a = Gtk2::Alignment->new(1.0, 0.5, 0.0, 0.0);
+    #     $a->add(Gtk2::Label->new("$fields{$f}:"));
+    #     $table->attach_defaults($a, 0, 1, $top, $top+1);
+    #     $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
+    #     $a->add($edit{$f});
+    #     $table->attach_defaults($a, 1, 2, $top, $top+1);
+    #     ++$top;
+    # }
 
     $a = Gtk2::Alignment->new(0.0, 0.5, 0.0, 0.0);
     $a->add($table);
@@ -1397,6 +1423,7 @@ sub window_edit {
             $pf->{$f} = $edit{$f}->get_text();
         }
         $pf->{retry} = $edit{retry}->get_active();
+        $pf->{securid} = $edit{securid}->get_active();
         $pf->{script} = $edit{script}->get_filename();
 
         if (! $pf->{name}) {
@@ -1900,7 +1927,7 @@ GetOptions(\%OPTS,
 # Initialize the VPN status
 jnc::Session->clean();
 
-$log->("MadScientist Juniper Network Connect $VERSION ($RELDATE)");
+$log->("MadScientist Juniper Network Connect Session Manager $VERSION ($RELDATE)");
 
 # If we want to disconnect the current session, do it before we create a window
 if ($OPTS{disconnect}) {
@@ -2014,7 +2041,7 @@ exit(0);
 
 =head1 NAME
 
-msjnc -- MadScientist Juniper Network Connect VPN Session Manager
+msjnc -- MadScientist Juniper Network Connect Session Manager
 
 =head1 SYNOPSIS
 
@@ -2091,6 +2118,14 @@ A name for the profile.  You can choose this name as you like: it is not
 provided to the VPN server.  It's only for local identification.  This is
 required and must be unique between all profiles.
 
+=item B<Auto-reconnect>
+
+If this box is checked, then when the script detects that the session timed
+out it will automatically attempt to log back in using the same password
+provided before.  If the login is not successful for any reason, then no
+further automatic login is attempted (until the next successful login and
+subsequent timeout).
+
 =item B<User>
 
 The login username for the VPN server.  This is required.
@@ -2106,6 +2141,15 @@ If the profile has no password, it will be requested each time you start the
 application.  As long as the password is running and you don't change your
 profile, the password will be remembered until you exit the application.
 
+=item B<SecurID>
+
+If this is checked then the password will be assumed to use SecurID (or other
+randomization function) and will not ever be reused.  If this is not checked
+then the password you enter will be re-used whenever you reconnect.  It
+doesn't make sense to both enter a password here I<and> check this box.  It
+also doesn't make sense to check this box and also check the C<Auto-reconnect>
+box.
+
 =item B<Server/URL>
 
 The VPN server name or IP address, or full URL.  If you need to specify a
@@ -2118,7 +2162,7 @@ Juniper Network Connect requires a "realm" identifier.  When you enter the
 server information it will try to retrieve the realm from the server.  Where
 this is not possible (for example, the server supports multiple realms or
 has a non-standard way of detecting the realm) you will need to enter the
-value.
+value by hand.
 
 =item B<Proxy>
 
