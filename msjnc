@@ -37,8 +37,8 @@ more details.';
 #    <input ... name="realm" value="XXXX">
 # and use "XXXX" (no quotes) as the realm value.
 
-my $VERSION = '2.0';
-my $RELDATE = '20 Aug 2012';
+my $VERSION = '2.1';
+my $RELDATE = '22 Aug 2012';
 my $RELURL  = 'http://mad-scientist.net/juniper.html';
 
 my $debug = 0;
@@ -121,7 +121,12 @@ $RELURL\n";
 # in the form HH:MM:SS
 sub elapsed {
     my $i = time() - $_[0];
-    return sprintf("%02d:%02d:%02d", $i / 3600, ($i % 3600) / 60, $i % 60);
+    local $_ = '';
+    if ($i > 86400) {
+        $_ = ($i/86400).'d ';
+        $i %= 86400;
+    }
+    return sprintf("%s%02d:%02d:%02d", $_, $i/3600, ($i % 3600)/60, $i % 60);
 }
 
 # Convert a count of bytes into something more readable
@@ -568,11 +573,11 @@ sub _readlog {
     # Look through the log file, starting where we left off last time
     open(my $L, '<', "$JNCPATH/ncsvc.log");
     if (! $L) {
-        $log->("$JNCPATH/ncsvc.log: $!");
+        $log->("Session: $JNCPATH/ncsvc.log: $!");
         return 0;
     }
 
-    my %prev =%CURRENT;
+    my %prev = %CURRENT;
 
     # Jump to where we last left off.  If this fails never mind, we'll
     # just read from the beginning.
@@ -593,11 +598,14 @@ sub _readlog {
         } elsif (/^(\d+)\..*\sncphandler\.info\s+session\s+timedout\s+\(/) {
             # We got a timeout
             $CURRENT{timedout} = _cvtdate($1);
-        } elsif (/\ssession\.info\s+NC\s+client\s+network\s+is\s+([.0-9]+)/) {
+        } elsif (/\ssession\.info\s+IVE\s+sent\s+NC\s+IP\s+([.0-9]+)/) {
             # Or: /\badapter\.info\s+cip\s*=\s*([.0-9]+)\S*\s+mask/
             $CURRENT{address} = $1;
         }
     }
+
+    $prev{status} eq $CURRENT{status}
+        or $log->("Session: Change from $prev{status} to $CURRENT{status}");
 
     # Save the amount of file we've already parsed
     $LOG_OFFSET = tell($L);
@@ -633,9 +641,6 @@ sub update {
     # If there's an active pid, wait for it in case it died.
     $PID && waitpid($PID, 1) == $PID and $PID = 0;
 
-    # Remember the current state of the session
-    my %prev = %CURRENT;
-
     # Act on any changes to the current status
     if (! _readlog($noop)) {
         # No log file...
@@ -669,11 +674,17 @@ sub update {
         }
     }
 
-    # Retry if we're disconnected and we timedout since the last update
-    if ($CURRENT{status} eq 'Disconnected' && $CURRENT{timedout}) {
-        $log->("Session: Timeout detected at $CURRENT{timedout}");
-        _retry();
-        $CURRENT{timedout} = 0;
+    if ($CURRENT{status} eq 'Disconnected') {
+        if ($CURRENT{timedout}) {
+            # Retry if we're disconnected and we timed out
+            $log->("Session: Timeout detected at $CURRENT{timedout}");
+            _retry();
+            $CURRENT{timedout} = 0;
+        } else {
+            # Didn't time out, so reset the counters
+            $CURRENT{total_ctime} = 0;
+            $CURRENT{total_received} = $CURRENT{total_sent} = 0;
+        }
     }
 
     return get();
@@ -939,16 +950,23 @@ sub window_update {
     $WIN->set_title($pf ? "MS-JNC: $pf->{name}"
                     : 'MS JNC');
     $OBJ{server}->set_text($server);
-    if ($status eq 'Disconnected') {
+    if ($status ne 'Connected') {
         foreach my $k (qw(elapsed sent received address)) {
             $OBJ{$k}->set_text('---');
         }
     } else {
-        $OBJ{elapsed}->set_text($vpn->{ctime} ? elapsed($vpn->{ctime}) : "---");
-        foreach my $k (qw(sent received)) {
-            $OBJ{$k}->set_text($vpn->{$k} ? cvtbytes($vpn->{$k}) : '---');
-        }
         $OBJ{address}->set_text($vpn->{address} || "---");
+
+        local $_ = $vpn->{ctime} ? elapsed($vpn->{ctime}) : "---";
+        $vpn->{total_ctime} and $_ .= ' ('.elapsed($vpn->{total_ctime}).')';
+        $OBJ{elapsed}->set_text($_);
+
+        foreach my $k (qw(sent received)) {
+            $_ = $vpn->{$k} ? cvtbytes($vpn->{$k}) : '---';
+            $vpn->{"total_$k"}
+                and $_ .= ' ('.cvtbyes($vpn->{$k}+$vpn->{"total_$k"}).')';
+            $OBJ{$k}->set_text($_);
+        }
     }
 
     return 1;
@@ -1167,7 +1185,6 @@ Use it anyway?") and return 1;
             $ping->port_number($pf->{port});
             $ok = $ping->ping($pf->{host});
         }
-        print "got port $pf->{port}\n";
     }
 
     if (! $ok) {
