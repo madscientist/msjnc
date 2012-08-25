@@ -37,11 +37,11 @@ more details.';
 #    <input ... name="realm" value="XXXX">
 # and use "XXXX" (no quotes) as the realm value.
 
-my $VERSION = '2.1';
-my $RELDATE = '22 Aug 2012';
+my $VERSION = '2.2';
+my $RELDATE = '25 Aug 2012';
 my $RELURL  = 'http://mad-scientist.net/juniper.html';
 
-my $debug = 0;
+our $debug = $ENV{__MSJNC_DEBUG__} || 0;
 
 use strict;
 use Carp;
@@ -191,7 +191,9 @@ sub filechanged {
 }
 
 # This function invokes a child process and writes a password to its stdin
-# It returns 1 if the child succeeds, 0 otherwise.
+# If the first option is a ref, it's hash of options ($OPT).
+# If $OPT->{wait} is not set runs in the background and returns the PID.
+# Otherwise, returns 1 if the child succeeds, 0 otherwise.
 sub pwd_child {
     my $o = ref $_[0] ? shift : {};
     my $pwd = shift;
@@ -431,8 +433,9 @@ use Time::Local;
 my %CURRENT = ();
 my $ACTIVE = 0;
 my $PID = 0;
-my $LOG_OFFSET = 0;
 my $LOG = undef;
+my $LOG_OFFSET = 0;
+my $LOG_LAST = '';
 
 # Convert a date as given in the NC log to time() format
 sub _cvtdate {
@@ -505,6 +508,8 @@ sub run_script {
 sub _connected {
     my ($noop, $server, $ctime) = @_;
 
+    $log->("DBG: Connected: $server ($ctime)") if $main::debug;
+
     $CURRENT{status} = 'Connected';
     $CURRENT{server} = $server;
     $CURRENT{ctime} = $ctime;
@@ -526,6 +531,8 @@ sub _connected {
 # Invoke this when a disconnect is discovered
 sub _disconnected {
     my $noop = $_[0];
+
+    $log->("DBG: Disconnected noop=$noop") if $main::debug;
 
     $CURRENT{status} = 'Disconnected';
     $CURRENT{address} = '';
@@ -561,7 +568,7 @@ sub _readlog {
     # If it has, then read it in to detect state changes.
     # This is kind of a hack but it's the only mostly-accurate way I know of.
     my $new = main::filechanged("$JNCPATH/ncsvc.log", $LOG)
-        or return {};
+        or return 1;
 
     # If the inode is different or the file got smaller it's a new log
     ! $LOG || $new->{ino} != $LOG->{ino} || $new->{size} < $LOG->{size}
@@ -584,24 +591,63 @@ sub _readlog {
     seek($L, $LOG_OFFSET, 0);
 
     local $_;
-    while (defined ($_ = <$L>)) {
-        if (/\sncsvc\.info\s+Connecting\s+to\b.*?\s([-.a-zA-Z0-9]+)(:[0-9]+)?\s+\(/) {
-            # Starting to connect
-            $CURRENT{status} = 'Connecting';
-            $CURRENT{server} = $1;
-        } elsif (/^(\d+)\..*\ssession\.info\s+Connected\s+to\b.*?\s([-.a-zA-Z0-9]+)\s+\(/) {
-            _connected($noop, $2, _cvtdate($1));
-        } elsif (/\ssession\.info\s+disconnecting\s+from\s/) {
-            $CURRENT{status} = 'Disconnecting';
-        } elsif (/\ssession\.info\s+disconnected\s+from\s/) {
-            _disconnected($noop);
-        } elsif (/^(\d+)\..*\sncphandler\.info\s+session\s+timedout\s+\(/) {
-            # We got a timeout
-            $CURRENT{timedout} = _cvtdate($1);
-        } elsif (/\ssession\.info\s+IVE\s+sent\s+NC\s+IP\s+([.0-9]+)/) {
-            # Or: /\badapter\.info\s+cip\s*=\s*([.0-9]+)\S*\s+mask/
-            $CURRENT{address} = $1;
+
+    # If we have a partial line left over from the last read start with that
+    $LOG_OFFSET && $LOG_LAST and $_ = $LOG_LAST;
+    $LOG_LAST = '';
+
+    my $l = 0;
+
+    # Read in from where we left off
+    while (1) {
+        my $n = <$L>;
+        defined $n or last;
+        $_ .= $n;
+        ++$l;
+
+        # If there is no newline here then save it and stop: partial line
+        if (! /\n$/) {
+            $LOG_LAST = $_;
+            last;
         }
+
+        if (/^(\d+)\..*\sncsvc\.info\s+Connecting\s+to\b.*?\s([-.a-zA-Z0-9]+)(:[0-9]+)?\s+\(/) {
+            $log->("DBG: $1: Connecting") if $main::debug;
+            $CURRENT{status} = 'Connecting';
+            $CURRENT{server} = $2;
+
+        } elsif (/^(\d+)\..*\ssession\.info\s+Connected\s+to\b.*?\s([-.a-zA-Z0-9]+)\s+\(/) {
+            $log->("DBG: $1: Connected") if $main::debug;
+            _connected($noop, $2, _cvtdate($1));
+
+        } elsif (/(\d+)\..*\ssession\.info\s+disconnecting\s+from\s/) {
+            $log->("DBG: $1: Disconnecting") if $main::debug;
+            $CURRENT{status} = 'Disconnecting';
+
+        } elsif (/(\d+)\..*\ssession\.info\s+disconnected\s+from\s/) {
+            $log->("DBG: $1: Disconnected") if $main::debug;
+            _disconnected($noop);
+
+        } elsif (/(\d+)\..*\sncapp\.error\s+Failed\s+to\s+authenticate\s/) {
+            $log->("DBG: $1: Auth failed") if $main::debug;
+            clean($noop);
+            $CURRENT{status} = 'Failed';
+
+        } elsif (/^(\d+)\..*\sncphandler\.info\s+session\s+timedout\s+\(/) {
+            $log->("DBG: $1: Timeout") if $main::debug;
+            $CURRENT{timedout} = _cvtdate($1);
+
+        } elsif (/(\d+)\..*\ssession\.info\s+IVE\s+sent\s+NC\s+IP\s+([.0-9]+)/) {
+            # Or: /(\d+)\..*\badapter\.info\s+cip\s*=\s*([.0-9]+)\S*\s+mask/
+            $CURRENT{address} = $2;
+        }
+
+        $_ = '';
+    }
+
+    if ($main::debug) {
+        $log->("DBG: parsed $l log lines\n") if $main::debug > 1;
+        $LOG_LAST and $log->("DBG: Partial line: '$LOG_LAST'");
     }
 
     $prev{status} eq $CURRENT{status}
@@ -622,6 +668,8 @@ sub _retry {
         $CURRENT{total_received} += $CURRENT{received};
         $CURRENT{total_sent} += $CURRENT{sent};
 
+        $log->("DBG: Retrying") if $main::debug;
+
         jnc::Session->connect() and $CURRENT{retrying} = 1;
 
     } else {
@@ -638,12 +686,17 @@ sub update {
     # If true, run in no-op mode (don't run scripts, retry, etc.)
     my ($class, $noop) = @_;
 
-    # If there's an active pid, wait for it in case it died.
-    $PID && waitpid($PID, 1) == $PID and $PID = 0;
-
     # Act on any changes to the current status
-    if (! _readlog($noop)) {
-        # No log file...
+    my $r = _readlog($noop);
+
+    # If there's an active pid, see if it died.
+    if ($PID && waitpid($PID, 1) == $PID) {
+        $PID = 0;
+        $CURRENT{status} ne 'Disconnected' and _disconnected($noop);
+    }
+
+    # If _readlog() failed (no log file?) skip early
+    if (! $r) {
         clean();
         return get();
     }
@@ -775,7 +828,8 @@ sub connect {
         or die "Cannot obtain VPN certificate from $pf->{host}\n";
     push @cmd, ('-f', $cert);
 
-    return main::pwd_child($pwd, @cmd);
+    $PID = main::pwd_child($pwd, @cmd);
+    return $PID;
 }
 
 sub disconnect {
@@ -916,7 +970,7 @@ sub window_choose_active {
 sub window_update {
     # Note our current state so we can see if it's changed
     my $oldstatus = jnc::Session->get_status();
-    my $vpn = jnc::Session->update();
+    my $vpn = jnc::Session->update(0);
 
     my $server = $vpn->{server} || '---';
 
@@ -938,12 +992,12 @@ sub window_update {
             $CONN->set_label('Disconnect');
             $CONN->set_image($OBJ{disconnect});
             $OBJ{disconnect}->show();
-            $CONN->set_sensitive($status eq 'Connected');
+            $CONN->set_sensitive(1);
         } else {
             $CONN->set_label('Connect');
             $CONN->set_image($OBJ{connect});
             $OBJ{connect}->show();
-            $CONN->set_sensitive($status eq 'Disconnected');
+            $CONN->set_sensitive(1);
         }
     }
 
@@ -964,7 +1018,7 @@ sub window_update {
         foreach my $k (qw(sent received)) {
             $_ = $vpn->{$k} ? cvtbytes($vpn->{$k}) : '---';
             $vpn->{"total_$k"}
-                and $_ .= ' ('.cvtbyes($vpn->{$k}+$vpn->{"total_$k"}).')';
+                and $_ .= ' ('.cvtbytes($vpn->{$k}+$vpn->{"total_$k"}).')';
             $OBJ{$k}->set_text($_);
         }
     }
@@ -1715,7 +1769,7 @@ my $PWD_su = undef;
 sub asroot {
     # If we are root we can just run it
     if ($< == 0) {
-        print "Running: @_\n" if $debug;
+        $log->("Running: @_\n") if $debug;
         system(@_);
         return $? == 0;
     }
@@ -1736,7 +1790,7 @@ Retry the password entry?") or last;
     # If no sudo, use su(1).  Su is so lame that we can't give it a password
     # unless we have a terminal.  I could have used Expect but forget it;
     # just run it in an xterm like Juniper does.
-    print "Running: xterm -e 'su -c '@_''\n" if $debug;
+    $log->("Running: xterm -e 'su -c '@_''\n") if $debug;
     system(qw(xterm -e), "echo Enter the root password; su -c '@_'");
     # Feh.  xterm doesn't propogate the exit code of the shell command.
     # This is useless.
@@ -2002,7 +2056,7 @@ if ($OPTS{connect}) {
     jnc::Session->connect(@pwds);
     my $e = time() + 60;
     while (time() < $e) {
-        jnc::Session->update();
+        jnc::Session->update(0);
         if (jnc::Session->get_status() eq 'Connected') {
             print " done\n";
             exit(0);

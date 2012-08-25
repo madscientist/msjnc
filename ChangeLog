@@ -1,3 +1,13 @@
+2012-08-25  Paul Smith  <paul@mad-scientist.net>
+
+	* Release 2.2
+
+	* msjnc (_readlog): Manage log file reading more accurately.
+	Add debug statements.  Handle authentication failures.
+	(update): Check for ncsvc commands failing and disconnect if so.
+	(window_update): Never make the connect/disconnect button insensitive.
+	Fix cvtbyes() -> cvtbytes().
+
 2012-08-22  Paul Smith  <paul@mad-scientist.net>
 
 	* Release 2.1
