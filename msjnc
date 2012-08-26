@@ -37,8 +37,8 @@ more details.';
 #    <input ... name="realm" value="XXXX">
 # and use "XXXX" (no quotes) as the realm value.
 
-my $VERSION = '2.2';
-my $RELDATE = '25 Aug 2012';
+my $VERSION = '2.3';
+my $RELDATE = '26 Aug 2012';
 my $RELURL  = 'http://mad-scientist.net/juniper.html';
 
 our $debug = $ENV{__MSJNC_DEBUG__} || 0;
@@ -123,7 +123,7 @@ sub elapsed {
     my $i = time() - $_[0];
     local $_ = '';
     if ($i > 86400) {
-        $_ = ($i/86400).'d ';
+        $_ = int($i/86400).'d ';
         $i %= 86400;
     }
     return sprintf("%s%02d:%02d:%02d", $_, $i/3600, ($i % 3600)/60, $i % 60);
@@ -1009,14 +1009,14 @@ sub window_update {
             $OBJ{$k}->set_text('---');
         }
     } else {
-        $OBJ{address}->set_text($vpn->{address} || "---");
+        $OBJ{address}->set_text($vpn->{address} || '---');
 
-        local $_ = $vpn->{ctime} ? elapsed($vpn->{ctime}) : "---";
+        local $_ = elapsed($vpn->{ctime} || 0);
         $vpn->{total_ctime} and $_ .= ' ('.elapsed($vpn->{total_ctime}).')';
         $OBJ{elapsed}->set_text($_);
 
         foreach my $k (qw(sent received)) {
-            $_ = $vpn->{$k} ? cvtbytes($vpn->{$k}) : '---';
+            $_ = cvtbytes($vpn->{$k} || 0);
             $vpn->{"total_$k"}
                 and $_ .= ' ('.cvtbytes($vpn->{$k}+$vpn->{"total_$k"}).')';
             $OBJ{$k}->set_text($_);
