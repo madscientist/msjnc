@@ -28,7 +28,7 @@ more details.';
 # Requires that Perl GTK2 be installed.
 # Typically this means using your package manager to install packages such as
 # Red Hat/Fedora:    perl-Gtk2
-# Debian/Ubuntu:     libgtk2-perl
+# Debian/Ubuntu:     libgtk2-perl libwww-perl
 #
 # This script tries to detect the REALM.  If there's only one realm possible
 # then typically it will be embedded in the web page; in that case we can
@@ -37,8 +37,8 @@ more details.';
 #    <input ... name="realm" value="XXXX">
 # and use "XXXX" (no quotes) as the realm value.
 
-my $VERSION = '2.3';
-my $RELDATE = '26 Aug 2012';
+my $VERSION = '2.4';
+my $RELDATE = '27 Sep 2012';
 my $RELURL  = 'http://mad-scientist.net/juniper.html';
 
 our $debug = $ENV{__MSJNC_DEBUG__} || 0;
@@ -691,6 +691,8 @@ sub update {
 
     # If there's an active pid, see if it died.
     if ($PID && waitpid($PID, 1) == $PID) {
+        my $r = $?;
+        $log->("Session: PID $PID exited with ", ($r << 8), " ($r)");
         $PID = 0;
         $CURRENT{status} ne 'Disconnected' and _disconnected($noop);
     }
@@ -703,10 +705,11 @@ sub update {
 
     # If we have an address and we don't know the interface yet, find it
     if ($CURRENT{address} && ! $CURRENT{iface}) {
-        foreach (split /\n\n/, `ifconfig -a`) {
-            /^(\S+)\s.*\sinet\saddr:\Q$CURRENT{address}\E/s or next;
-            $CURRENT{iface} = $1;
-            last;
+        foreach (split /^\d+:\s*/m, `ip addr show`) {
+            if (m,^(\S+):\s.*\sinet\s\Q$CURRENT{address}\E/,s) {
+                $CURRENT{iface} = $1;
+                last;
+            }
         }
     }
 
@@ -1046,6 +1049,11 @@ sub window_dis_connect {
     if (! $pf) {
         # This shouldn't ever happen...?!?!
         window_error($WIN, "Active profile $pfn is not valid!");
+        goto UPDATE;
+    }
+
+    if (! -f '/etc/resolv.conf') {
+        window_error($WIN, "The /etc/resolv.conf file must exist.");
         goto UPDATE;
     }
 
@@ -2048,6 +2056,8 @@ if ($OPTS{connect}) {
     jnc::Session->get_status() =~ /^Connect/
         and die "A Juniper Network Connect VPN session is already active.\n";
     $pf or die "Please specify a profile to use for the connection.\n";
+    # The /etc/resolv.conf file needs to exist or ncsvc will die
+    -f '/etc/resolv.conf' or die "The /etc/resolv.conf file must exist ($!)\n";
     # Turn off all buffering
     select STDERR; $| = 1;
     select STDOUT; $| = 1;
