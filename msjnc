@@ -80,6 +80,7 @@ my $LOGH = undef;
 
 # GUI objects
 my $WIN;
+my $TRAY;
 my %OBJ;
 my $CONN;
 
@@ -845,6 +846,14 @@ package main;
 
 # --------------- WINDOW
 # Manage the main status window
+
+sub tray_icon_event {
+    if ($WIN->get_property('visible')) {
+        $WIN->hide();
+    } else {
+        $WIN->show();
+    }
+}
 
 sub window_debug_signal {
     my ($widget, $info) = @_;
@@ -1649,6 +1658,9 @@ sub window_create {
         _File => {
             item_type => '<Branch>',
             children => [
+                _MinimizeToTray => {
+                    callback => \&tray_icon_event,
+                },
                 _Quit => {
                     callback => sub { window_delete() or Gtk2->main_quit(); },
                     callback_action => ++$caction,
@@ -1753,6 +1765,12 @@ sub window_create {
 
     # Add the table to the window
     $window->add($vb);
+
+    # Create system tray icon
+    my $tray = Gtk2::StatusIcon->new_from_file($JNCICON);
+    $tray->set_tooltip("MS-JNC");
+    $tray->signal_connect('activate', \&tray_icon_event);
+    $TRAY = $tray;
 
     $window->show_all();
     $WIN = $window;
