@@ -27,7 +27,7 @@ more details.';
 #
 # Requires that Perl GTK2 be installed.
 # Typically this means using your package manager to install packages such as
-# Red Hat/Fedora:    perl-Gtk2
+# Red Hat/Fedora:    perl-Gtk2 perl-libwww-perl
 # Debian/Ubuntu:     libgtk2-perl libwww-perl
 #
 # This script tries to detect the REALM.  If there's only one realm possible
@@ -1816,7 +1816,8 @@ sub asroot {
 
     # If not root and we have no sudo password try to get one
     while (! $PWD_sudo) {
-        $PWD_sudo = window_passwd("Enter Password", "Enter your password");
+        $PWD_sudo = window_passwd("Enter Password", "  Installation requires admin privileges.  
+  Enter your GNU/Linux account password:  ");
         sudo($PWD_sudo, 'id -u') and last;
         $PWD_sudo = undef;
         # If they want to give up go to the next method
@@ -1832,6 +1833,7 @@ Retry the password entry?") or last;
     # just run it in an xterm like Juniper does.
     $log->("Running: xterm -e 'su -c '@_''\n") if $debug;
     system(qw(xterm -e), "echo Enter the root password; su -c '@_'");
+
     # Feh.  xterm doesn't propogate the exit code of the shell command.
     # This is useless.
     return $? == 0;
@@ -2040,8 +2042,8 @@ setpaths();
 GetOptions(\%OPTS,
            'help|h|?' => sub { Getopt::Long::HelpMessage(); },
            'version|V' => \&version,
-           'jarfile=s', 'profile=s', 'root', 'fg', 'connect',
-           'disconnect', 'uninstall')
+           'jarfile=s', 'profile=s', 'root', 'fg',
+           'connect', 'disconnect', 'uninstall')
     or exit(1);
 
 # Initialize the VPN status
@@ -2144,6 +2146,8 @@ if (! $OPTS{fg}) {
     close($N);
 }
 
+$log->("Started graphical session with PID $$");
+
 # Create the main window
 window_create();
 
@@ -2215,9 +2219,14 @@ Make profile I<p> active, rather than the default profile.
 
 Allow root to start the VPN.
 
+=item B<--connect>
+
+Start the VPN connection.  Uses the profile specifed with C<--profile>, or the
+default profile.  Does not start the GUI.
+
 =item B<--disconnect>
 
-Bring down any existing VPN connection.
+Bring down any existing VPN connection.  Does not start the GUI.
 
 =item B<--fg>
 
