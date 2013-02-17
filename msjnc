@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 #
-my $C = 'Copyright 2008-2012 Paul D. Smith <paul@mad-scientist.net>';
+my $C = 'Copyright 2008-2013 Paul D. Smith <paul@mad-scientist.net>';
 #
 # MadScientist JNC Session Manager
 # I know this script is really long, but it turns out doing anything
@@ -37,8 +37,8 @@ more details.';
 #    <input ... name="realm" value="XXXX">
 # and use "XXXX" (no quotes) as the realm value.
 
-my $VERSION = '2.4';
-my $RELDATE = '27 Sep 2012';
+my $VERSION = '2.5';
+my $RELDATE = '17 Feb 2013';
 my $RELURL  = 'http://mad-scientist.net/juniper.html';
 
 our $debug = $ENV{__MSJNC_DEBUG__} || 0;
@@ -2327,7 +2327,7 @@ C<jnc_proxy_port>, C<jnc_proxy_domain>, C<jnc_proxy_user>.
 
 =head1 COPYRIGHT
 
-Copyright 2008-2012 Paul D. Smith <paul@mad-scientist.net>
+Copyright 2008-2013 Paul D. Smith <paul@mad-scientist.net>
 
 This program is free software; you can redistribute it and/or modify it
 under th e terms of the Perl Artistic License or the GNU General Public
