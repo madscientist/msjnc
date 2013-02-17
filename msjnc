@@ -74,6 +74,8 @@ my $NCSVC;
 my $JNCICON;
 my $GETCERT = 'getx509certificate.sh';
 
+my $INTEST = 0;
+
 # Log objects
 my $LOGFILE = '.msjnc.log';
 my $LOGH = undef;
@@ -1834,7 +1836,13 @@ sub setpaths {
 
     $JNPATH = "$HOME/.juniper_networks";
     $JNCPATH = "$JNPATH/network_connect";
-    $NCSVC = "$JNCPATH/ncsvc";
+    if ($ENV{__MSJNC_TEST__}) {
+        $NCSVC = $ENV{__MSJNC_TEST__};
+        $INTEST = 1;
+    } else {
+        $NCSVC = "$JNCPATH/ncsvc";
+        $INTEST = 0;
+    }
     $JNCICON = "$JNPATH/networkconnect.gif";
 }
 
@@ -1938,6 +1946,9 @@ Failed to create application definition.\n";
 # Returns the set of commands needed to be run to fix the application
 # permissions, or empty if it's all good.
 sub check_app {
+    # In test mode we don't have to do any of this
+    $INTEST and return ();
+
     # Collect all the operations we need to run as root into a shell command
     my @cmd = ();
 

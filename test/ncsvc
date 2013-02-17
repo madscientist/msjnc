@@ -1,0 +1,351 @@
+#!/bin/sh
+# Test version of ncsvc
+# (C) Copyright 2013 Paul D. Smith <paul@mad-scientist.net>
+#
+# This script is free software; you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free
+# Software Foundation; either version 3 of the License, or (at your option)
+# any later version.
+#
+# This script is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.';
+
+# Provide a test version of ncsvc
+
+exe=ncsvc
+root="$HOME/.juniper_networks/network_connect"
+svclog="$root/$exe.log"
+tstlog="$root/test-$exe.log"
+pidfile="$root/test-$exe.pid"
+timerpid=
+
+# timeout in seconds (default = 1 hr.)
+SVCTIMEOUT=3600
+
+HOST=`hostname -s`
+LOCALIP=192.168.1.200
+LOCALGW=192.168.1.1
+
+DNS1=8.8.8.8
+DNS2=8.8.4.4
+DNSDOMAIN=vpntest.com
+
+VPNIP=172.16.1.200
+VPNGW=172.16.1.1
+
+VPNIPHEX=`perl -e 'for $i (split /\./, $ARGV[0]) { printf "%x", $i; } print "\n";' $VPNIP`
+VPNGWHEX=`perl -e 'for $i (split /\./, $ARGV[0]) { printf "%x", $i; } print "\n";' $VPNGW`
+
+RT1DEST=172.16.1.0
+RT1MASK=255.255.255.0
+
+RT1HEX=0x11223344
+RT2HEX=0x11224433
+
+# These values can come from the command line
+SERVER=
+SERVERIP=1.2.3.4
+USER=
+PASSWD=
+CERT=
+REALM=
+SVCPORT=
+URL=
+URLSUFFIX=
+PROXY=
+PROXYPORT=
+PROXYPWD=
+PROXYDOM=
+
+die () { tstlog "DIE: $*"; echo "$*"; exit 1; }
+
+stamp () { date +%Y%m%d%H%M%S.%N | sed 's/0*...$//'; }
+log ()
+{
+    log=$1
+    shift
+    if [ -n "$1" ]; then
+        echo "`stamp` $exe[p$$.t$$] $*" >> "$log"
+    else
+        while read line; do
+            echo "`stamp` $exe[p$$.t$$] $line" >> "$log"
+        done
+    fi
+}
+svclog () { log "$svclog" "$@"; }
+tstlog () { log "$tstlog" "$@"; }
+
+# Interruptable sleep
+isleep ()
+{
+    i=$1
+    while [ $i -gt 0 ]; do
+        sleep 1
+        i=$((i-1))
+    done
+}
+
+# This mimics a connect operation
+connect ()
+{
+    tstlog "Connect operation invoked"
+    svclog <<EOF
+ncsvc.info New ncsvc log level set to 3 (nccommon.cpp:75)
+sysdeps.info restoring DNS settings... (sysdeps.cpp:796)
+ncsvc.info Connecting to $SERVER:443 (ncsvc.cpp:494)
+dsclient.info state: kStateSignin (dsclient.cpp:248)
+dsclient.info --> GET $URLSUFFIX (authenticate.cpp:162)
+dsclient.info <-- 302 https://$SERVER/dana-na/auth/url_4/welcome.cgi (authenticate.cpp:194)
+dsclient.info state: kStateWelcome (dsclient.cpp:256)
+dsclient.info --> GET /dana-na/auth/url_4/welcome.cgi (authenticate.cpp:162)
+dsclient.info <-- 200  (authenticate.cpp:194)
+dsclient.info state: kStateLogin (dsclient.cpp:288)
+dsclient.info --> POST /dana-na/auth/url_4/login.cgi (authenticate.cpp:162)
+sclient.info <-- 302 https://$SERVER/dana/home/starter0.cgi?check=yes (authenticate.cpp:194)
+sclient.info --> GET /dana/home/starter0.cgi?check=yes (authenticate.cpp:162)
+dsclient.info <-- 200  (authenticate.cpp:194)
+authStateLogin.info starter0.cgi has asked for tz_offset parameter (authenticate.cpp:355)
+authStateLogin.info starter0.cgi has asked for clienttime parameter (authenticate.cpp:362)
+dsclient.info --> POST /dana/home/starter0.cgi?check=yes (authenticate.cpp:162)
+dsclient.info <-- 302 /dana/home/starter.cgi (authenticate.cpp:194)
+dsclient.info --> GET /dana/home/starter.cgi (authenticate.cpp:162)
+dsclient.info <-- 200  (authenticate.cpp:194)
+dsclient.info state: kStateAuthenticated (dsclient.cpp:368)
+IpcConn.info listening for IPC connections on port $SVCPORT (ncipc.cpp:72)
+IpcConn.info unregistering the IPC acceptor IO handler (ncipc.cpp:114)
+IpcConn.info client opening connection to service (ncipc.cpp:287)
+session.info disconnectAll called (session.cpp:1609)
+ipsec.info New tunnel being created (tunnel.cpp:44)
+ncsvc.info received onOpen (ncsvc.cpp:546)
+session.info ive_host = $SERVER (session.cpp:175)
+session.info Will not use a proxy to connect to the IVE (session.cpp:217)
+rmon.info got system route 0.0.0.0/0.0.0.0 gw $LOCALGW metric 0 via $RT1HEX (routemon.cpp:735)
+rmon.info got system route $RT1DEST/$RT1MASK gw 0.0.0.0 metric 0 via $RT2HEX (routemon.cpp:735)
+rmon.info  Collecting latest routes from the system (routemon.cpp:1715)
+rmon.info best route to $SERVERIP is 0.0.0.0/0.0.0.0 via $RT1HEX metric: 0 (routemon.cpp:1736)
+rmon.info adding route to $LOCALGW/255.255.255.255 with gw 0.0.0.0, metric 1, if_id 144687280 (routemon.cpp:893)
+rmon.info adding server route to the IVE: dest = $SERVERIP, gw = $LOCALGW, if_id = 144687280, dev = eth0 (routemon.cpp:1876)
+session.info connecting to ive $SERVER (session.cpp:344)
+ncp.error ncpEstablish for IVE $SERVER with context 0x89ed660 (ncp.cpp:410)
+main.info Setting DSSSL to use Default ciphers (ncp.cpp:1635)
+main.info Setting NCP certificate hash for DSSSL certificate verification (ncp.cpp:1644)
+main.info Using DSSSL to connect to IVE (ncp.cpp:1705)
+connect.info creating a new HTTP connection... (ncp_dsssl.cpp:168)
+connect.info compression is enabled (ncp_dsssl.cpp:392)
+connect.info IVE ncp_version = 2 (ncp_dsssl.cpp:402)
+conn.info cleanup 0 (ncp.cpp:1393)
+ncp.error NCP_ESTABLISH_DONE for IVE $SERVER (ncp.cpp:1748)
+ncphandler.info establish done (ncphandler.cpp:238)
+ncp.info connect to $HOST:$SVCPORT svc 4 (ncp.cpp:760)
+connect.info creating a new HTTP connection... (ncp_dsssl.cpp:168)
+connect.info compression is enabled (ncp_dsssl.cpp:392)
+connect.info IVE ncp_version = 2 (ncp_dsssl.cpp:402)
+connect.error deflateInit2 returned 0 (ncp_dsssl.cpp:478)
+ncphandler.info connect done (ncphandler.cpp:243)
+session.info Connected to ive $SERVER (session.cpp:408)
+adapter.info opened tun adapter 0000000B (adapter.cpp:404)
+ipsec.info received kmp message 301 size 995 (tunnel.cpp:202)
+ProxyConfigManager.info No modification of the proxy settings is required (sysdeps.cpp:269)
+session.info IVE sent DNS server $DNS1 (session.cpp:1431)
+session.info IVE sent DNS server $DNS2 (session.cpp:1431)
+session.info IVE sent DNS suffix $DNSDOMAIN (session.cpp:1459)
+session.info IVE DNS has priority over Client DNS (session.cpp:1488)
+session.info IVE sent WINS server 255.255.255.255 (session.cpp:1572)
+session.info IVE sent NC IP $VPNIP netmask 255.255.255.255 (session.cpp:1178)
+session.info NC client network is $VPNIP (session.cpp:1183)
+adapter.info IVE get DNS server $DNS1 (adapter.cpp:501)
+adapter.info IVE get DNS server $DNS2 (adapter.cpp:501)
+adapter.info cip = $VPNIP, mask = 255.255.255.255, gw = $VPNGW, domain = $DNSDOMAIN (adapter.cpp:619)
+ipsec.info send kmp message 303 size 16 (tunnel.cpp:194)
+session.info adapter is configured (session.cpp:1210)
+session.info Deny route count = 0 (session.cpp:1245)
+rmon.info adding route to $RT1DEST/$RT1MASK with gw $VPNIP, metric 1, if_id 0 (routemon.cpp:893)
+session.info added route to dest = $RT1DEST, mask = $RT1MASK (session.cpp:1297)
+session.info route count = 1 (session.cpp:1301)
+rmon.info system routes:  (routemon.cpp:278)
+rmon.info 0.0.0.0/0.0.0.0 gw $LOCALGW via $RT1HEX metric 0 (routemon.cpp:2213)
+rmon.info $RT1DEST/$RT1MASK gw 0.0.0.0 via $RT2HEX metric 0 (routemon.cpp:2213)
+rmon.info monitored routes:  (routemon.cpp:280)
+rmon.info $LOCALGW/255.255.255.255 gw 0.0.0.0 via $RT1HEX metric 1 (routemon.cpp:2213)
+rmon.info $SERVERIP/255.255.255.255 gw $LOCALGW via $RT1HEX metric 1 (routemon.cpp:2213)
+rmon.info $RT1DEST/$RT1MASK gw $VPNIP via 0x00000000 metric 1 (routemon.cpp:2213)
+rmon.info Excluded Routes:  (routemon.cpp:282)
+rmon.info starting the route monitor... (routemon.cpp:337)
+session.info Tunnel setup done (session.cpp:469)
+ipsec.info Creating UDP socket $LOCALIP:0 (udp.cpp:33)
+ipsec.info setting IP_PMTU_DISCOVER (0) (udp.cpp:228)
+ipsec.info new ESP tunnel in:0xCC694CE1, out:0xED460EE5 $LOCALIP:0 -> $SERVERIP:4500 (engine.cpp:463)
+ipsec.info send kmp message 301 size 86 (tunnel.cpp:194)
+ipsec.info IpsecEngine::setTunAdapter (nil) (engine.cpp:87)
+ncsvc.info received onConnect (ncsvc.cpp:614)
+ncsvc.info on get config... (ncsvc.cpp:675)
+ncsvc.info client_addr = $VPNIPHEX, mask = ffffffff, gw = $VPNGWHEX (ncsvc.cpp:693)
+ipsec.info IpsecEngine::setTunAdapter 0x89ece10 (engine.cpp:87)
+ipsec.info send kmp message 303 size 13 (tunnel.cpp:194)
+EOF
+}
+
+disconnect ()
+{
+    tstlog "Disconnect operation invoked"
+    svclog <<EOF
+worker.error Closing conn 0x903db68 due to session timeout (ncp_dsssl.cpp:967)
+session.info disconnecting from ive $SERVER with reason 3 (session.cpp:486)
+adapter.info closing tun adapter 0000000B (adapter.cpp:786)
+sysdeps.info restoring DNS settings... (sysdeps.cpp:796)
+ipsec.warn Cleaning up sa 0x2B8CE95A (esp.cpp:58)
+ncphandler.error NCP disconnect failed, error 107 (ncphandler.cpp:115)
+ncp.error ncpTearDown for IVE $SERVER (ncp.cpp:482)
+worker.error NCP worker has been requested to stop (ncp_dsssl.cpp:641)
+conn.info cleanup 0 (ncp.cpp:1393)
+writer.error thread exit (ncp.cpp:1803)
+ncphandler.info disconnect done (ncphandler.cpp:281)
+ncphandler.info teardown done (ncphandler.cpp:291)
+ncp.error ncpCleanup for IVE $SERVER (ncp.cpp:602)
+rmon.error Failed to delete route: dest $RT1DEST mask $RT1MASK, gw $VPNIP. Error 3 (routemon.cpp:1236)
+session.info disconnected from ive $SERVER with reason 3 (session.cpp:535)
+ncui.info received onDisconnect with reason = 3 (ncsvc.cpp:628)
+IpcConn.error recv failed with errno 3 (ncipc.cpp:259)
+EOF
+}
+
+keepalive ()
+{
+    tstlog "Initiating keepalive"
+    while true; do
+        isleep 26
+        svclog <<EOF
+ncsvc.info bytes sent = 0, recvd = 0 (ncsvc.cpp:663)
+ncsvc.info pkts sent = 0, recvd = 0 (ncsvc.cpp:664)
+EOF
+        isleep 30
+        svclog <<EOF
+ncsvc.info bytes sent = 0, recvd = 0 (ncsvc.cpp:663)
+ncsvc.info pkts sent = 0, recvd = 0 (ncsvc.cpp:664)
+EOF
+        isleep 4
+        svclog "ipsec.info Restarting keep-alives (engine.cpp:337)"
+    done
+}
+
+cleanup ()
+{
+    rm -f "$pidfile"
+    [ -n "$timerpid" ] && kill "$timerpid"
+    timerpid=0
+}
+
+get_pid ()
+{
+    if [ -f "$pidfile" ]; then
+        pid=`cat "$pidfile"`
+        case $pid in
+            (''|*[!0-9]*) : bad pidfile ;;
+            (*) case `ps -o comm= -p "$pid"` in
+                    (*/ncsvc|ncsvc) echo "$pid"; return 0 ;;
+                esac ;;
+        esac
+        tstlog "Removing obsolete pid file for $pid"
+        rm -f "$pidfile"
+    fi
+    return 1
+}
+
+write_pidfile ()
+{
+    pid=`get_pid`
+    [ -n "$pid" ] && die "NCSVC is already running"
+    echo "$$" > "$pidfile" || die "Failed to write pidfile: $pidfile"
+}
+
+kill_server ()
+{
+    pid=`get_pid`
+    [ -n "$pid" ] || die "NCSVC is not running"
+    echo "Killing NCSVC pid $pid"
+    kill -HUP "$pid"
+    exit 0
+}
+
+killme ()
+{
+    tstlog "Detected a SIGHUP"
+    disconnect
+    exit 0
+}
+
+start_timeout ()
+{
+    tstlog "Starting a service timeout of $SVCTIMEOUT seconds"
+    (trap - 0 1 14; sleep "$SVCTIMEOUT"; kill -ALRM "$1";) </dev/null >/dev/null 2>&1 &
+    timerpid=$!
+}
+
+timeout ()
+{
+    tstlog "A service timeout was fired"
+    svclog "ncphandler.info session timedout (ncphandler.cpp:274)"
+    disconnect
+    exit 0
+}
+
+# -----------------------------------------------------------------------------
+main ()
+{
+    mkdir -p "$root" || die "Failed to create $root"
+
+    tstlog "
+------------------------------------------------------------------------------"
+    tstlog "Starting $0 with:"
+    i=1
+    for a in "$@"; do
+        tstlog "  $i: $a"
+        i=$((i+1))
+    done
+
+    # Get the options
+    while getopts h:u:p:f:r:P:L:gU:y:z:s:a:d:vK arg; do
+        case $arg in
+            (h) SERVER=$OPTARG ;;
+            (u) USER=$OPTARG ;;
+            (p) PASSWD=$OPTARG ;;
+            (f) CERT=$OPTARG ;;
+            (r) REALM=$OPTARG ;;
+            (P) SVCPORT=$OPTARG ;;
+            (U) URL=$OPTARG ;;
+            (y) PROXY=$OPTARG ;;
+            (z) PROXYPORT=$OPTARG ;;
+            (s) PROXYUSER=$OPTARG ;;
+            (a) PROXYPWD=$OPTARG ;;
+            (d) PROXYDOM=$OPTARG ;;
+            (v) show_version ;;
+            (K) kill_server ;;
+            (:) die "Option -$arg requires an argument" ;;
+            (?) die "Unknown option -$arg" ;;
+        esac
+    done
+
+    : ${URL:=https://$SERVER}
+    : ${SVCPORT:=443}
+
+    URLSUFFIX=`echo "$URL" | sed 's,^http[^/]*//[^/]*,,'`
+    : ${URLSUFFIX:=/}
+
+    write_pidfile
+
+    trap cleanup 0
+    trap killme 1    # SIGHUP
+    trap timeout 14  # SIGALRM
+
+    connect
+    start_timeout "$$"
+
+    # This runs forever
+    keepalive
+
+    exit 0
+}
+
+main "$@"
