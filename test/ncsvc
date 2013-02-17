@@ -87,6 +87,19 @@ isleep ()
     done
 }
 
+show_version ()
+{
+    cat <<EOF
+Juniper Network Connect Server for Linux.  (MSJNC NCSVC EMULATOR)
+Version         : 7.0
+Release Version : 7.0-0-Build18107
+Build Date/time : Apr 12 2011 12:21:50
+Copyright 2001-2010 Juniper Networks
+Copyright 2013 Paul D. Smith <paul@mad-scientist.net>
+EOF
+    exit 0
+}
+
 # This mimics a connect operation
 connect ()
 {
