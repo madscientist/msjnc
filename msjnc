@@ -435,10 +435,16 @@ use Time::Local;
 
 my %CURRENT = ();
 my $ACTIVE = 0;
-my $PID = 0;
 my $LOG = undef;
 my $LOG_OFFSET = 0;
 my $LOG_LAST = '';
+
+# We have to make a distinction between an ncsvc we started ($CHILD)
+# and one we may have just found already running.  $PID is the ncsvc pid.
+# We guarantee that if $CHILD is set, $PID is always equal to it.
+# Conversely, if $PID is not set, $CHILD is always 0.
+my $PID = 0;
+my $CHILD = 0;
 
 # Convert a date as given in the NC log to time() format
 sub _cvtdate {
@@ -685,23 +691,47 @@ sub _retry {
     return 1;
 }
 
+sub _getpid {
+    my $arg = $_[0] ? "-p '$_[0]'" : '-e';
+    # This appears to be the most portable option.
+    # Kind of gross that we may have to run ps(1) on every update, but...
+    local $_ = `ps $arg -o pid= -o comm=`;
+    return m,^\s*(\d+)\s(?:.*/)?ncsvc$, ? $1 : 0;
+}
+
 sub update {
     # If true, run in no-op mode (don't run scripts, retry, etc.)
     my ($class, $noop) = @_;
 
     # Act on any changes to the current status
-    my $r = _readlog($noop);
+    my $rlog = _readlog($noop);
 
-    # If there's an active pid, see if it died.
-    if ($PID && waitpid($PID, 1) == $PID) {
-        my $r = $?;
-        $log->("Session: PID $PID exited with ", ($r << 8), " ($r)");
+    # If we're connected and don't have a PID, we better be able to find one
+    if ($CURRENT{status} eq 'Connected' && ! $PID) {
+        $PID = _getpid();
+        $PID and $log->("Session: Found previously-running PID $PID\n");
+    }
+
+    if ($CHILD) {
+        # If we have a child, see if it died and reap it if so
+        if (waitpid($CHILD, 1) == $CHILD) {
+            my $r = $?;
+            $log->("Session: PID $CHILD exited with ", ($r << 8), " ($r)");
+            $PID = $CHILD = 0;
+        }
+    } elsif ($PID && ! _getpid($PID)) {
+        # We have a non-child PID but it's not valid anymore
         $PID = 0;
-        $CURRENT{status} ne 'Disconnected' and _disconnected($noop);
+    }
+
+    # If we don't have a PID but appear to be connected, disconnect
+    if (! $PID && $CURRENT{status} ne 'Disconnected') {
+        $log->("Session: Log says Connected, but no PID: disconnecting.\n");
+        _disconnected($noop);
     }
 
     # If _readlog() failed (no log file?) skip early
-    if (! $r) {
+    if (! $rlog) {
         clean();
         return get();
     }
@@ -834,8 +864,8 @@ sub connect {
         or die "Cannot obtain VPN certificate from $pf->{host}\n";
     push @cmd, ('-f', $cert);
 
-    $PID = main::pwd_child($pwd, @cmd);
-    return $PID;
+    $PID = $CHILD = main::pwd_child($pwd, @cmd);
+    return $CHILD;
 }
 
 sub disconnect {
