@@ -54,7 +54,7 @@ use LWP::Simple;
 
 # Get graphics
 use Glib;
-use Gtk2 '-init';
+use Gtk2;
 use Gtk2::SimpleMenu;
 use Gtk2::Pango;
 
@@ -2118,6 +2118,10 @@ if ($OPTS{connect}) {
     print " failed\n";
     die "The Juniper Network Connect VPN session did not start.\n";
 }
+
+# If we get here we're going to start a graphical session so init GTK
+# Do this before forking, so DISPLAY errors are caught early.
+Gtk2->init();
 
 # If we want to run in the background, do that now
 if (! $OPTS{fg}) {
