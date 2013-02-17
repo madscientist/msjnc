@@ -492,7 +492,7 @@ sub run_script {
 
     # Set up the environment
     $ENV{jnc_profile} = $pf->{name};
-    foreach (qw(url host port realm user
+    foreach (qw(url host port svcport realm user
                 proxy proxy_port proxy_domain proxy_user)) {
         $ENV{"jnc_$_"} = $pf->{$_} || '';
     }
@@ -793,7 +793,7 @@ sub connect {
         return 0;
     }
 
-    $log->("Session: connecting using profile $pf->{name}: $pf->{host}:$pf->{port} user $pf->{user}");
+    $log->("Session: connecting using profile $pf->{name}: $pf->{host} user $pf->{user}");
 
     # Remember possible password info, if SecurID is not set
     # If we don't have new passwords, try the old ones
@@ -816,7 +816,7 @@ sub connect {
 
     my @cmd = ($NCSVC, '-h', $pf->{host}, '-u', $pf->{user},
                '-r', $pf->{realm});
-    $pf->{port} and push @cmd, ('-P', $pf->{port});
+    $pf->{svcport} and push @cmd, ('-P', $pf->{svcport});
     $pf->{url}  and push @cmd, ('-U', $pf->{url});
 
     # If we have a proxy add those arguments
@@ -1192,15 +1192,15 @@ sub window_url_check {
     my $hostnm;
     my $url;
     my $fqdnre = '[a-zA-Z0-9][-.a-zA-Z0-9]*';
-    if (/^(($fqdnre)(?:(\d+))?)$/) {
+    if (/^(($fqdnre)(?::(\d+))?)$/) {
         $hostnm = $1;
         $pf->{host} = $2;
-        $3 and $pf->{port} = $3;
-    } elsif (m,^(https?)://(($fqdnre)(?::(\d+))?).*$,) {
-        $url = $_;
-        $hostnm = $2;
-        $pf->{host} = $3;
-        $pf->{port} = $4 || getservbyname($1, 'tcp');
+        $pf->{port} = $3 || getservbyname('https', 'tcp') || 443;
+    } elsif (m,^((https?)://(($fqdnre)(?::(\d+))?).*)$,) {
+        $url = $1;
+        $hostnm = $3;
+        $pf->{host} = $4;
+        $pf->{port} = $5 || getservbyname($2,'tcp') || ($2 eq 'http'? 80 : 443);
     } else {
         window_error($edit->{dialog}, "Server/URL:
 Please provide a full URL, hostname, or hostname:port.");
@@ -1240,27 +1240,10 @@ Use it anyway?") and return 1;
     }
 
     # Make sure we can connect to the hostname
-    my $ok = 1;
-    my $http = getservbyname('http', 'tcp') || 80;
-    my $https = getservbyname('https', 'tcp') || 443;
     my $ping = Net::Ping->new('tcp', 2);
-    if ($pf->{port}) {
-        # If we got a port use that
-        $ping->port_number($pf->{port});
-        $ok = $ping->ping($pf->{host});
-    } else {
-        # No port, try both https and http
-        $pf->{port} = $https;
-        $ping->port_number($pf->{port});
-        $ok = $ping->ping($pf->{host});
-        if (! $ok) {
-            $pf->{port} = $http;
-            $ping->port_number($pf->{port});
-            $ok = $ping->ping($pf->{host});
-        }
-    }
+    $ping->port_number($pf->{port});
 
-    if (! $ok) {
+    if (! $ping->ping($pf->{host})) {
         window_busy($edit->{dialog}, 0);
         window_yn($edit->{dialog}, "$hostnm is not responding.
 Use it anyway?") and return 1;
@@ -1269,10 +1252,9 @@ Use it anyway?") and return 1;
     }
 
     # If we didn't get a URL from the user, construct it now.
-    $url or $url = ($pf->{port} == $https ? 'https' : 'http')
+    $url or $url = ($pf->{port} == 80 ? 'http' : 'https')
         ."://$pf->{host}"
-        .($pf->{port} == $http || $pf->{port} == $https ? ''
-          : ":$pf->{port}");
+        .($pf->{port} == 80 || $pf->{port} == 443 ? '' : ":$pf->{port}");
 
     # If we don't already have a realm value see if we can figure it out
     if (! $edit->{realm}->get_text()) {
