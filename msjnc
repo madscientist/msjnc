@@ -696,7 +696,7 @@ sub _getpid {
     # This appears to be the most portable option.
     # Kind of gross that we may have to run ps(1) on every update, but...
     local $_ = `ps $arg -o pid= -o comm=`;
-    return m,^\s*(\d+)\s(?:.*/)?ncsvc$, ? $1 : 0;
+    return m,^\s*(\d+)\s(?:.*/)?ncsvc$,m ? $1 : 0;
 }
 
 sub update {
