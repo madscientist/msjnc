@@ -51,12 +51,14 @@ use File::Temp qw(tempdir);
 use POSIX qw(_exit setsid strftime);
 use Net::Ping;
 use LWP::Simple;
+use Cwd 'abs_path';
 
 # Get graphics
 use Glib;
-use Gtk2;
+use Gtk2 -init;
 use Gtk2::SimpleMenu;
 use Gtk2::Pango;
+use Gtk2::AppIndicator;
 
 # For debug
 use Data::Dumper;
@@ -85,6 +87,7 @@ my $WIN;
 my $TRAY;
 my %OBJ;
 my $CONN;
+my $INDIC;
 
 my $DESKTOP = '[Desktop Entry]
 Name=Network Connect
@@ -1037,11 +1040,21 @@ sub window_update {
             $CONN->set_image($OBJ{disconnect});
             $OBJ{disconnect}->show();
             $CONN->set_sensitive(1);
+            if (defined $INDIC) {
+                $INDIC->set_icon_name_active($OBJ{indic_connect_icon});
+                $OBJ{indic_connect_btn}->hide();
+                $OBJ{indic_disconnect_btn}->show();
+            }
         } else {
             $CONN->set_label('Connect');
             $CONN->set_image($OBJ{connect});
             $OBJ{connect}->show();
             $CONN->set_sensitive(1);
+            if (defined $INDIC) {
+                $INDIC->set_icon_name_active($OBJ{indic_disconnect_icon});
+                $OBJ{indic_disconnect_btn}->hide();
+                $OBJ{indic_connect_btn}->show();
+            }
         }
     }
 
@@ -1653,6 +1666,42 @@ sub window_manage {
     return window_edit($pfn);
 }
 
+sub indicator_create {
+    my $indic_disconnect_icon = abs_path $0;
+    my $indic_connect_icon = $indic_disconnect_icon;
+    $indic_disconnect_icon =~ s/\/msjnc$/\/nc-grey-disc.png/;
+    $indic_connect_icon =~ s/\/msjnc$/\/nc-grey.png/;
+    $OBJ{indic_disconnect_icon} = $indic_disconnect_icon;
+    $OBJ{indic_connect_icon} = $indic_connect_icon;
+    
+    $INDIC = Gtk2::AppIndicator->new("MSJNC",$indic_disconnect_icon,'communications');
+    my $menu=Gtk2::Menu->new();
+    my $status=Gtk2::MenuItem->new_with_mnemonic("_Status");
+    $OBJ{indic_connect_btn} = Gtk2::MenuItem->new_with_mnemonic("_Connect");
+    $OBJ{indic_disconnect_btn} = Gtk2::MenuItem->new_with_mnemonic("_Disconnect");
+    my $quit=Gtk2::MenuItem->new_with_mnemonic("_Quit");
+    $quit->signal_connect("activate",sub { window_delete() or Gtk2->main_quit(); } );
+    $status->signal_connect("activate",sub { $WIN->show(); } );
+    $OBJ{indic_connect_btn}->signal_connect("activate",sub { window_dis_connect(); });
+    $OBJ{indic_disconnect_btn}->signal_connect("activate",sub { window_dis_connect(); });
+    $menu->append($OBJ{indic_connect_btn});
+    $menu->append($OBJ{indic_disconnect_btn});
+    $menu->append($status);
+    $menu->append($quit);
+    $menu->show_all();
+    $INDIC->set_menu($menu);
+    $INDIC->set_active(1);
+    $WIN->hide();
+}
+
+sub window_wm_close_event {
+    if (defined $INDIC) {
+        $WIN->hide();
+        return 1;
+    }
+    return window_delete();
+}
+
 sub window_create {
     my $window = Gtk2::Window->new('toplevel');
     $window->set_border_width(10);
@@ -1660,7 +1709,7 @@ sub window_create {
     $window->set_default_icon_from_file($JNCICON);
 
     # Handle WM delete events
-    $window->signal_connect(delete_event => \&window_delete);
+    $window->signal_connect(delete_event => \&window_wm_close_event);
     $window->signal_connect(destroy => sub { Gtk2->main_quit(); });
 
     # Create a vbox to hold the window content
@@ -1785,9 +1834,13 @@ sub window_create {
     $tray->set_tooltip("MS-JNC");
     $tray->signal_connect('activate', \&tray_icon_event);
     $TRAY = $tray;
-
     $window->show_all();
     $WIN = $window;
+
+    if (! $tray->is_embedded) {
+        # system tray not supported; try Unity app indicator
+        indicator_create();
+    }
 
     return $window;
 }
@@ -2121,9 +2174,6 @@ if ($OPTS{connect}) {
     die "The Juniper Network Connect VPN session did not start.\n";
 }
 
-# If we get here we're going to start a graphical session so init GTK
-# Do this before forking, so DISPLAY errors are caught early.
-Gtk2->init();
 
 # If we want to run in the background, do that now
 if (! $OPTS{fg}) {
