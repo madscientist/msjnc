@@ -70,6 +70,7 @@ our $HOME;
 my %OPTS;
 my $JNPATH;
 my $JNCPATH;
+my $JNCLOG;
 my $NCSVC;
 my $JNCICON;
 my $GETCERT = 'getx509certificate.sh';
@@ -576,7 +577,7 @@ sub _readlog {
     # See if we think the log has been changed since the last time
     # If it has, then read it in to detect state changes.
     # This is kind of a hack but it's the only mostly-accurate way I know of.
-    my $new = main::filechanged("$JNCPATH/ncsvc.log", $LOG)
+    my $new = main::filechanged("$JNCLOG", $LOG)
         or return 1;
 
     # If the inode is different or the file got smaller it's a new log
@@ -587,9 +588,9 @@ sub _readlog {
     $LOG = $new;
 
     # Look through the log file, starting where we left off last time
-    open(my $L, '<', "$JNCPATH/ncsvc.log");
+    open(my $L, '<', "$JNCLOG");
     if (! $L) {
-        $log->("Session: $JNCPATH/ncsvc.log: $!");
+        $log->("Session: $JNCLOG: $!");
         return 0;
     }
 
@@ -1847,9 +1848,13 @@ sub setpaths {
         $HOME = (getpwuid($>))[7];
         $HOME && -d $HOME or die "No home directory found!\n";
     }
-
-    $JNPATH = "$HOME/.juniper_networks";
+    if ($ENV{'JNPATH'}) {
+        $JNPATH = $ENV{'JNPATH'};
+    } else {
+        $JNPATH = "$HOME/.juniper_networks" if not defined $JNPATH;
+    }
     $JNCPATH = "$JNPATH/network_connect";
+    $JNCLOG = "$HOME/.juniper_networks/network_connect/ncsvc.log";
     if ($ENV{__MSJNC_TEST__}) {
         $NCSVC = $ENV{__MSJNC_TEST__};
         $INTEST = 1;
