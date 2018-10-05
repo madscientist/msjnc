@@ -60,6 +60,7 @@ use Gtk2::Pango;
 
 # For debug
 use Data::Dumper;
+use MIME::Base64;
 
 $ENV{PATH} = '/sbin:/usr/sbin:/bin:/usr/bin:'.$ENV{PATH};
 umask(022);
@@ -72,6 +73,8 @@ my $JNPATH;
 my $JNCPATH;
 my $NCSVC;
 my $JNCICON;
+my $JNCICON_CONNECTED;
+my $JNCICON_CONNECTING;
 my $GETCERT = 'getx509certificate.sh';
 
 my $INTEST = 0;
@@ -85,6 +88,36 @@ my $WIN;
 my $TRAY;
 my %OBJ;
 my $CONN;
+
+my $IMG1=decode_base64('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABmJLR0QA/wD/AP+gvaeTAAAACXBI
+WXMAAAsTAAALEwEAmpwYAAAAB3RJTUUH3wICDCAlKO+WMAAAAO1JREFUWMPtVlsSgzAIhE7Oao+R
+5Rpeln7ETqOWEnzVjzDDaHQCOyxsQvRn4y2bAFLjO5+OGCAtRjMHil+UfA2gBhKJmSLJc37HHklk
+/j/n2VNb6Uhb2kbkK9/6BhGxxwU9eyQA6gAOt7RDdLRl325xKrO/zVs0ITCGeso0hHRApC1xRA8S
+AU6ZUAX+KCHRUFVC7ap48Vt4LO+6OAfq80CdvbYnr6gwKWCzJ2oK2KVAQHEKeCr7OK0HO5UTPxHA
+Tn71K/C0m9CJH5qCdQUamvC4MeQfaz5XB5aXj3sYoDSNkq8l/TjuADqADuDGAF685ASbV3fBCgAA
+AABJRU5ErkJggg==');
+my $IMG2=decode_base64('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABmJLR0QA/wD/AP+gvaeTAAAACXBI
+WXMAAAsTAAALEwEAmpwYAAAAB3RJTUUH3wICDgIaOr8pQwAAAadJREFUWMPtVj1PAkEQfYtrYXWR
+xMLWEAv6S/gzttjzB272D5jY0vJnSK6WglBY2ZgoVhSGjMXecXfAMrv3gRZOMoGDvTePNzPvAH45
+VJ2biMCOz1XnjInANlBJIptnKn5IoEwkBFOHFE+SHHsKY6rfJ0nllX3boeuMjTFH+805iZDonWFm
+2ySAfwKth25gOuxzX2NzsrtfL308IWANuZNtCPIBY/wKh/iBBpEgE5WACycExiUl2K2KhO/TR/ue
+954D5ecBC/e6U0uikrMFyjkT5RYosQWGEN4Clck+za7H7lICvgaREuqzrMCjewgF/KAtOFTAYwjb
+W0N14lp16wP7fz7+RhAxslWSvcRXgZirQKlqx3NP4PZKh94QASNjExGAmF9aKH4St7djGOF2NAEG
+Q5ujCYAIQ8T82eiXC7g7BfJDeQyGwP0DAOCyiQAS7o7Axzuw3QKbTXG4fwMA+G5CQMLNCayXM2C1
+KA6tFsD8CQBw1aC+iKuzqbxGzJw+AxcTy3o5A+MLa6SqX7u8B66urEbMPC98/BWpumu8BQKu7mTv
+j5FwxA/vBWjH6zBz6QAAAABJRU5ErkJggg==');
+my $IMG3=decode_base64('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABmJLR0QA/wD/AP+gvaeTAAAACXBI
+WXMAAAsTAAALEwEAmpwYAAAAB3RJTUUH3wICDCAOhFNvcAAAAhdJREFUWMPdVlFK60AUPROTQaGk
++CES+tX+CLqD7sJN6DJ6sw0X1B0o6MfzfbwapKA1FJQEHT/sxGmSmTupFR8eCMkkM+ee3Jl7OcAP
+Q5iDhGJljjPKRdsiIijL+9b5Ll5hTirHEkeHAwDA9f0M0bRoiCCCmkxUXTvStF1EQvFdOZZJjfcq
+o/ykEmAG78seAOCpWDZEfAZvJG9NiBbB8C4yyvdDvdCcBAB92cPw4AD/MEMz+EX1xxqTydpdaREO
+3ggAKgHFWwEAeFWv2BE7AAAZyNZjY/6lAaVFmHDwlgAQ6Im38zkWxbJaqFPlOLM+WDh49yoBGeUi
+mha4uZ9hWT5j/vJgPYRdkFG+38KromnxmFG+u7YFGeUioVj9wS0AIHKUYUcRdd6/GeUj/T30qftt
+iLB9C7nFjqajfNbZmpM3iKCU2uziRHplwKiyr1TDNgQAaeoXuK0f2AUQMWkig/izEwJnRiaUPSsc
+v88+fjybgHGvP7ettV8hl1SyboGwnglzCwS7BSmh+xaIVdovVuMzeyiGPwSRYOIrPgPn9kPI8Heq
+gmYGPA7h9spQOMbie/tA3Xz8HyBSWJUS30s8M+DrirvCxRvU3CtGp0OMTocoxxIJxZdbCO7kDQz3
+mmgD2Zc9HB0OUI7lcULx41f+nOMNOFe8Mkcbg+MN2tyrhuleNwXHG/i61w3h7YpZ9/oTrnjNvf5a
+V/wOJZUJavQs5LQAAAAASUVORK5CYII=');
 
 my $DESKTOP = '[Desktop Entry]
 Name=Network Connect
@@ -1043,6 +1076,15 @@ sub window_update {
             $OBJ{connect}->show();
             $CONN->set_sensitive(1);
         }
+        if ($status eq 'Connected') {
+          $TRAY->set_from_file($JNCICON_CONNECTED);
+        } else {
+          if ($status eq 'Connecting') {
+            $TRAY->set_from_file($JNCICON_CONNECTING);
+          } else {
+            $TRAY->set_from_file($JNCICON);
+          }
+        }
     }
 
     $WIN->set_title($pf ? "MS-JNC: $pf->{name}"
@@ -1839,6 +1881,18 @@ Retry the password entry?") or last;
     return $? == 0;
 }
 
+sub writeFile {
+    my $fileName=shift;
+    my $data=shift;
+    if (! -f $fileName) {
+        open(my $I, '>', $fileName)
+            or die "open: $fileName: $!\nFailed to create Juniper Network Connect icon file.\n";
+        print $I $data;
+        close($I) or die "close: $fileName: $!\nFailed to create Juniper Network Connect icon file.\n";
+        chmod 0644, $fileName;
+    }
+}
+
 # Set up the initial pathnames.  Note they may not exist!
 sub setpaths {
     # Find the user's home directory
@@ -1857,7 +1911,9 @@ sub setpaths {
         $NCSVC = "$JNCPATH/ncsvc";
         $INTEST = 0;
     }
-    $JNCICON = "$JNPATH/networkconnect.gif";
+    $JNCICON = "$JNPATH/nc-disconnected.png";
+    $JNCICON_CONNECTED = "$JNPATH/nc-connected.png";
+    $JNCICON_CONNECTING = "$JNPATH/nc-connecting.png";
 }
 
 sub setup {
@@ -1920,20 +1976,10 @@ sub setup {
         copy($tmp, "$JNPATH/$GETCERT") or die "copy $GETCERT failed: $!\n";
     }
 
-    # Make sure we have an icon file.  If not unpack it
-    if (! -f $JNCICON) {
-        -f "$JNCPATH/NC.jar" or die "$JNCPATH/NC.jar: $!
-Invalid installation of Juniper Network Connect!\n";
-        my $gif = `unzip -p -q '$JNCPATH/NC.jar' networkconnect.gif`;
-        $? == 0 && $gif or die "Failed to extract icon from $JNCPATH/NC.jar\n";
-        open(my $I, '>', $JNCICON)
-            or die "open: $JNCICON: $!
-Failed to create Juniper Network Connect icon file.\n";
-        print $I $gif;
-        close($I) or die "close: $JNCICON: $!
-Failed to create Juniper Network Connect icon file.\n";
-        chmod 0644, $JNCICON;
-    }
+    # Make sure we have an icon file.  If not create it
+    writeFile($JNCICON, $IMG1);
+    writeFile($JNCICON_CONNECTING, $IMG2);
+    writeFile($JNCICON_CONNECTED, $IMG3);
 
     # Make sure we have a FreeDesktop applicaton file, or create it
     my $deskdir = "$HOME/.local/share/applications";
